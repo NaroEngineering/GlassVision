@@ -1,0 +1,209 @@
+{
+  "id": "wizard_study_001",
+  "displayName": "Wizard Study",
+  "theme": "wizard_study",
+  "environmentSceneID": "wizard_study_generated",
+  "difficulty": "normal",
+  "targetItems": [
+    {
+      "itemID": "feather_quill",
+      "displayName": "Feather Quill",
+      "assetID": "feather_quill",
+      "silhouetteAssetID": "feather",
+      "worldTransform": {
+        "position": [-0.22, -0.22, -1.18],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.09,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 10,
+      "pedestalSlotID": "slot_01",
+      "isDecoy": false
+    },
+    {
+      "itemID": "hourglass",
+      "displayName": "Hourglass",
+      "assetID": "hourglass",
+      "silhouetteAssetID": "hourglass",
+      "worldTransform": {
+        "position": [-1.34, 0.18, 0.72],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.11,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 9,
+      "pedestalSlotID": "slot_02",
+      "isDecoy": false
+    },
+    {
+      "itemID": "crystal_ball",
+      "displayName": "Crystal Ball",
+      "assetID": "crystal_ball",
+      "silhouetteAssetID": "sparkles",
+      "worldTransform": {
+        "position": [0.24, -0.08, -1.24],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.12,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 10,
+      "pedestalSlotID": "slot_03",
+      "isDecoy": false
+    },
+    {
+      "itemID": "potion_bottle",
+      "displayName": "Potion Bottle",
+      "assetID": "potion_bottle",
+      "silhouetteAssetID": "drop.fill",
+      "worldTransform": {
+        "position": [1.34, 0.12, 0.72],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.1,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 8,
+      "pedestalSlotID": "slot_04",
+      "isDecoy": false
+    },
+    {
+      "itemID": "spell_book",
+      "displayName": "Spell Book",
+      "assetID": "spell_book",
+      "silhouetteAssetID": "book.closed.fill",
+      "worldTransform": {
+        "position": [0.08, -0.02, -1.84],
+        "rotation": [0, 0.258819, 0, 0.965926],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.12,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 7,
+      "pedestalSlotID": "slot_05",
+      "isDecoy": false
+    },
+    {
+      "itemID": "key",
+      "displayName": "Key",
+      "assetID": "key",
+      "silhouetteAssetID": "key.fill",
+      "worldTransform": {
+        "position": [-1.56, -0.12, 0.58],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.09,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 8,
+      "pedestalSlotID": "slot_06",
+      "isDecoy": false
+    },
+    {
+      "itemID": "candle",
+      "displayName": "Candle",
+      "assetID": "candle",
+      "silhouetteAssetID": "flame.fill",
+      "worldTransform": {
+        "position": [1.56, -0.16, 0.58],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.09,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 8,
+      "pedestalSlotID": "slot_07",
+      "isDecoy": false
+    },
+    {
+      "itemID": "wand",
+      "displayName": "Wand",
+      "assetID": "wand",
+      "silhouetteAssetID": "wand.and.stars",
+      "worldTransform": {
+        "position": [-0.88, 0.44, -1.58],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.1,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 6,
+      "pedestalSlotID": "slot_08",
+      "isDecoy": false
+    },
+    {
+      "itemID": "moon_charm",
+      "displayName": "Moon Charm",
+      "assetID": "moon_charm",
+      "silhouetteAssetID": "moon.stars.fill",
+      "worldTransform": {
+        "position": [0.92, 0.32, -1.78],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.08,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 7,
+      "pedestalSlotID": "slot_09",
+      "isDecoy": false
+    },
+    {
+      "itemID": "tiny_dragon_figurine",
+      "displayName": "Tiny Dragon Figurine",
+      "assetID": "tiny_dragon_figurine",
+      "silhouetteAssetID": "sparkle",
+      "worldTransform": {
+        "position": [-1.08, 0.18, -1.72],
+        "rotation": [0, 0.382683, 0, 0.92388],
+        "scale": [1, 1, 1]
+      },
+      "boundsProfile": {
+        "radius": 0.11,
+        "minimumPortalOverlap": 0.5
+      },
+      "selectionPriority": 6,
+      "pedestalSlotID": "slot_10",
+      "isDecoy": false
+    }
+  ],
+  "decoyItems": [],
+  "dailyAvailability": {
+    "includedInDailyRotation": true
+  },
+  "audioProfile": "wizard_study_mvp",
+  "collectionSlotLayout": [
+    { "slotID": "slot_01", "position": [-0.18, 0.84, -0.1], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_02", "position": [-0.09, 0.84, -0.1], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_03", "position": [0.0, 0.84, -0.1], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_04", "position": [0.09, 0.84, -0.1], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_05", "position": [0.18, 0.84, -0.1], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_06", "position": [-0.18, 0.84, 0.04], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_07", "position": [-0.09, 0.84, 0.04], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_08", "position": [0.0, 0.84, 0.04], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_09", "position": [0.09, 0.84, 0.04], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] },
+    { "slotID": "slot_10", "position": [0.18, 0.84, 0.04], "rotation": [0, 0, 0, 1], "scale": [0.36, 0.36, 0.36] }
+  ],
+  "spawnRootID": "wizard_study_spawn_root",
+  "portalProfileID": "default_portal_profile",
+  "statsProfileID": "default_stats_profile"
+}

@@ -9,24 +9,23 @@ import SwiftUI
 
 @main
 struct GlassVisionApp: App {
-
-    @State private var appModel = AppModel()
+    @StateObject private var appModel = AppModel()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(appModel)
+                .environmentObject(appModel)
         }
         .windowStyle(.volumetric)
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveView()
-                .environment(appModel)
+                .environmentObject(appModel)
                 .onAppear {
-                    appModel.immersiveSpaceState = .open
+                    appModel.handleImmersiveOpened()
                 }
                 .onDisappear {
-                    appModel.immersiveSpaceState = .closed
+                    appModel.handleImmersiveClosed()
                 }
         }
         .immersionStyle(selection: .constant(.mixed), in: .mixed)

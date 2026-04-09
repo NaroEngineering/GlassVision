@@ -6,10 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		F0A79FAF2F87ED8B000C5023 /* RealityKitContent in Frameworks */ = {isa = PBXBuildFile; productRef = F0A79FAE2F87ED8B000C5023 /* RealityKitContent */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXContainerItemProxy section */
 		F0A79FBE2F87ED8C000C5023 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -57,7 +53,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F0A79FAF2F87ED8B000C5023 /* RealityKitContent in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,7 +113,6 @@
 			);
 			name = GlassVision;
 			packageProductDependencies = (
-				F0A79FAE2F87ED8B000C5023 /* RealityKitContent */,
 			);
 			productName = GlassVision;
 			productReference = F0A79FA92F87ED8B000C5023 /* GlassVision.app */;
@@ -485,13 +479,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		F0A79FAE2F87ED8B000C5023 /* RealityKitContent */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = RealityKitContent;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = F0A79FA12F87ED8B000C5023 /* Project object */;
 }

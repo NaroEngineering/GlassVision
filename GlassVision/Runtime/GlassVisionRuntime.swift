@@ -1,0 +1,908 @@
+//
+//  GlassVisionRuntime.swift
+//  GlassVision
+//
+//  Created by Codex on 4/9/26.
+//
+
+import Combine
+import Foundation
+import RealityKit
+import SwiftUI
+import simd
+
+@MainActor
+final class GlassVisionRuntime: ObservableObject {
+    enum AttachmentID {
+        static let checklist = "checklist_attachment"
+        static let debug = "debug_attachment"
+        static let completion = "completion_attachment"
+    }
+
+    enum LookingGlassState: String {
+        case idleOnPedestal
+        case hoverAvailable
+        case grabbed
+        case portalActive
+        case releasedReturning
+        case disabledTransition
+    }
+
+    enum RuntimeMode {
+        case unconfigured
+        case playing
+        case completed
+        case suspended
+        case failed
+    }
+
+    struct DebugOptions {
+        var showPortalCircle = false
+        var showProjectedBounds = false
+        var showGazeTarget = true
+        var showEligibleTarget = true
+        var showPedestalSlotIDs = false
+    }
+
+    struct ChecklistItem: Identifiable {
+        let id: String
+        let displayName: String
+        let symbolName: String
+        let isFound: Bool
+    }
+
+    private struct TargetRuntime {
+        let definition: TargetItemDefinition
+        let root: Entity
+        let visual: Entity
+        let highlight: Entity
+        let debugBounds: Entity
+    }
+
+    private struct TargetEvaluation {
+        let targetID: String
+        let overlapScore: Float
+        let centerInsidePortal: Bool
+        let passedOcclusion: Bool
+        let depth: Float
+        let radialDistance: Float
+        let selectionPriority: Int
+    }
+
+    private var sceneSubscriptions: [EventSubscription] = []
+    private var sessionAnchor = AnchorEntity(world: .zero)
+    private var root = Entity()
+    private var presentationRoot = Entity()
+    private var pedestalRoot = Entity()
+    private var portalWorld = Entity()
+    private var hiddenWorldRoot = Entity()
+    private var checklistAnchor = Entity()
+    private var debugAnchor = Entity()
+    private var completionAnchor = Entity()
+
+    private var glassRoot = Entity()
+    private var glassHandleHitTarget = Entity()
+    private var portalDisk = ModelEntity()
+    private var portalDebugRing = ModelEntity()
+    private var attachmentConfigured = false
+    private var didAddRoot = false
+    private var currentSessionID: UUID?
+    private var currentContext: PuzzleLaunchContext?
+    private weak var appModel: AppModel?
+    private var targetEntities: [String: TargetRuntime] = [:]
+    private var collectionSlotEntities: [String: Entity] = [:]
+    private var scene: RealityKit.Scene?
+    private var completionWasRecorded = false
+    private var isSceneActive = true
+    private var interactionLocked = false
+    private var portalRadius: Float = 0.13
+    private var portalDepthGate: Float = 0.04
+    private var homeGlassTransform = Transform.identity
+    private let audioFeedback = AudioFeedbackController()
+
+    @Published var runtimeMode: RuntimeMode = .unconfigured
+    @Published var glassState: LookingGlassState = .idleOnPedestal
+    @Published var puzzle: PuzzleDefinition?
+    @Published var foundItemIDs: Set<String> = []
+    @Published var elapsedTime: TimeInterval = 0
+    @Published var currentGazeTargetID: String?
+    @Published var currentEligibleTargetID: String?
+    @Published var currentEligibility: PortalEligibilitySnapshot?
+    @Published var lastTargetedEntityName = "None"
+    @Published var lastAssignedSlotID = "-"
+    @Published var latestFeedbackMessage = "Pick up the glass to reveal the hidden world."
+    @Published var trackingStateText = "Tracked"
+    @Published var lastAudioCueName = "None"
+    @Published var debugOptions = DebugOptions()
+
+    var checklistItems: [ChecklistItem] {
+        (puzzle?.targetItems ?? []).map { item in
+            ChecklistItem(
+                id: item.itemID,
+                displayName: item.displayName,
+                symbolName: symbolName(for: item.silhouetteAssetID),
+                isFound: foundItemIDs.contains(item.itemID)
+            )
+        }
+    }
+
+    var foundCount: Int {
+        foundItemIDs.count
+    }
+
+    var requiredCount: Int {
+        puzzle?.targetItems.count ?? 0
+    }
+
+    var launchPathTitle: String {
+        currentContext?.launchPath.title ?? "Puzzle Select"
+    }
+
+    var currentGazeTargetName: String {
+        targetEntities[currentGazeTargetID ?? ""]?.definition.displayName ?? "None"
+    }
+
+    var currentEligibleTargetName: String {
+        targetEntities[currentEligibleTargetID ?? ""]?.definition.displayName ?? "None"
+    }
+
+    var currentOverlapText: String {
+        String(format: "%.2f", currentEligibility?.overlapScore ?? 0)
+    }
+
+    var isPortalVisible: Bool {
+        glassState == .portalActive && runtimeMode == .playing
+    }
+
+    var completionTitle: String {
+        puzzle?.displayName ?? "Wizard Study"
+    }
+
+    func configureIfNeeded(
+        content: inout RealityViewContent,
+        attachments: RealityViewAttachments,
+        appModel: AppModel
+    ) async {
+        if !didAddRoot {
+            sessionAnchor = AnchorEntity(world: .zero)
+            sessionAnchor.name = "glass_vision_session_anchor"
+            root.name = "glass_vision_session_root"
+            sessionAnchor.addChild(root)
+            content.add(sessionAnchor)
+            didAddRoot = true
+            installSubscriptions(content: &content)
+        }
+
+        self.appModel = appModel
+        isSceneActive = appModel.sceneIsActive
+        scene = root.scene
+        configureAttachments(attachments)
+
+        if currentSessionID != appModel.activeLaunchContext?.id {
+            rebuild(for: appModel.activeLaunchContext, using: appModel)
+        } else {
+            updateAttachmentVisibility()
+        }
+    }
+
+    func update(
+        content: inout RealityViewContent,
+        attachments: RealityViewAttachments,
+        appModel: AppModel
+    ) {
+        self.appModel = appModel
+        scene = root.scene ?? scene
+        isSceneActive = appModel.sceneIsActive
+        configureAttachments(attachments)
+
+        if currentSessionID != appModel.activeLaunchContext?.id {
+            rebuild(for: appModel.activeLaunchContext, using: appModel)
+        }
+
+        updateAttachmentVisibility()
+        updateDebugGeometryVisibility()
+    }
+
+    func handlePinchConfirmation(on entity: Entity) {
+        lastTargetedEntityName = entity.name.isEmpty ? "Unnamed Entity" : entity.name
+
+        guard runtimeMode == .playing, isPortalVisible, !interactionLocked else {
+            latestFeedbackMessage = "The portal is not ready for collection."
+            playAudioCue(.invalidSelection)
+            return
+        }
+
+        guard isPortalEntity(entity) || targetID(from: entity) != nil else {
+            latestFeedbackMessage = "Only the lens reveals collectible targets."
+            playAudioCue(.invalidSelection)
+            return
+        }
+
+        if let tappedTargetID = targetID(from: entity),
+           let portalReference = currentPortalReference(),
+           let tappedEvaluation = evaluateTarget(id: tappedTargetID, portalReference: portalReference),
+           tappedEvaluation.centerInsidePortal,
+           tappedEvaluation.passedOcclusion,
+           tappedEvaluation.overlapScore >= (targetEntities[tappedTargetID]?.definition.boundsProfile.minimumPortalOverlap ?? 0.5) {
+            collectTarget(id: tappedTargetID, animated: true)
+        } else if isPortalEntity(entity), let candidateID = currentEligibleTargetID {
+            collectTarget(id: candidateID, animated: true)
+        } else {
+            latestFeedbackMessage = "No valid collectible is currently eligible."
+            playAudioCue(.invalidSelection)
+        }
+    }
+
+    func handleScenePhaseChange(_ scenePhase: ScenePhase) {
+        let newActiveState = scenePhase == .active
+        isSceneActive = newActiveState
+
+        if newActiveState {
+            if trackingStateText == "Tracked", runtimeMode == .suspended {
+                runtimeMode = .playing
+                glassState = .idleOnPedestal
+                latestFeedbackMessage = "Tracking restored. Pick up the glass to continue."
+            }
+        } else {
+            suspendInteraction(reason: "Scene inactive")
+        }
+    }
+
+    func handleImmersiveDismissal() {
+        suspendInteraction(reason: "Immersive space dismissed")
+    }
+
+    func reloadCurrentPuzzle() {
+        guard let currentContext else {
+            return
+        }
+        rebuild(for: currentContext, using: appModel)
+    }
+
+    func forceCollectCurrentTarget() {
+        guard let currentEligibleTargetID else {
+            return
+        }
+        collectTarget(id: currentEligibleTargetID, animated: true)
+    }
+
+    func forceCompletePuzzle() {
+        guard runtimeMode == .playing else {
+            return
+        }
+
+        for item in puzzle?.targetItems ?? [] where !foundItemIDs.contains(item.itemID) {
+            collectTarget(id: item.itemID, animated: false)
+        }
+    }
+
+    private func installSubscriptions(content: inout RealityViewContent) {
+        sceneSubscriptions.append(
+            content.subscribe(to: SceneEvents.Update.self, on: nil, componentType: nil) { [weak self] event in
+                self?.scene = event.scene
+                self?.tick(deltaTime: event.deltaTime)
+            }
+        )
+
+        sceneSubscriptions.append(
+            content.subscribe(to: SceneEvents.TrackingStateUpdate.self, on: nil, componentType: nil) { [weak self] event in
+                self?.handleTrackingStateUpdate(event.current)
+            }
+        )
+
+        sceneSubscriptions.append(
+            content.subscribe(to: ManipulationEvents.WillBegin.self, on: nil, componentType: nil) { [weak self] event in
+                self?.handleManipulationWillBegin(for: event.entity)
+            }
+        )
+
+        sceneSubscriptions.append(
+            content.subscribe(to: ManipulationEvents.WillRelease.self, on: nil, componentType: nil) { [weak self] event in
+                self?.handleManipulationWillRelease(for: event.entity)
+            }
+        )
+
+        sceneSubscriptions.append(
+            content.subscribe(to: ManipulationEvents.WillEnd.self, on: nil, componentType: nil) { [weak self] event in
+                self?.handleManipulationWillEnd(for: event.entity)
+            }
+        )
+    }
+
+    private func rebuild(for context: PuzzleLaunchContext?, using appModel: AppModel?) {
+        clearHierarchy()
+        currentSessionID = context?.id
+        currentContext = context
+        completionWasRecorded = false
+        foundItemIDs.removeAll()
+        elapsedTime = 0
+        currentGazeTargetID = nil
+        currentEligibleTargetID = nil
+        currentEligibility = nil
+        interactionLocked = false
+        lastAssignedSlotID = "-"
+        lastTargetedEntityName = "None"
+        trackingStateText = "Tracked"
+        lastAudioCueName = "None"
+        runtimeMode = .unconfigured
+        glassState = .disabledTransition
+
+        guard let context else {
+            latestFeedbackMessage = "Choose a puzzle from the menu."
+            return
+        }
+
+        guard let model = appModel ?? self.appModel,
+              let loadedPuzzle = model.repository.loadPuzzle(id: context.puzzleID) else {
+            latestFeedbackMessage = "The puzzle data could not be loaded."
+            runtimeMode = .failed
+            return
+        }
+
+        puzzle = loadedPuzzle
+
+        presentationRoot = Entity()
+        presentationRoot.name = "presentation_root"
+        root.addChild(presentationRoot)
+
+        portalWorld = Entity()
+        portalWorld.name = "portal_world"
+        portalWorld.components.set(WorldComponent())
+        root.addChild(portalWorld)
+
+        hiddenWorldRoot = Entity()
+        hiddenWorldRoot.name = "hidden_world_root"
+        portalWorld.addChild(hiddenWorldRoot)
+
+        buildPedestal()
+        buildGlass()
+        buildEnvironment()
+        buildTargets()
+
+        runtimeMode = isSceneActive ? .playing : .suspended
+        glassState = runtimeMode == .playing ? .hoverAvailable : .disabledTransition
+        latestFeedbackMessage = "Pick up the glass and scan the room for hidden objects."
+        updateAttachmentVisibility()
+        updateDebugGeometryVisibility()
+    }
+
+    private func buildPedestal() {
+        pedestalRoot = GeneratedAssetFactory.makePedestal()
+        presentationRoot.addChild(pedestalRoot)
+
+        checklistAnchor = Entity()
+        checklistAnchor.name = "checklist_anchor"
+        checklistAnchor.position = [0, 1.2, 0.12]
+        pedestalRoot.addChild(checklistAnchor)
+
+        debugAnchor = Entity()
+        debugAnchor.name = "debug_anchor"
+        debugAnchor.position = [0.64, 1.0, 0.02]
+        pedestalRoot.addChild(debugAnchor)
+
+        completionAnchor = Entity()
+        completionAnchor.name = "completion_anchor"
+        completionAnchor.position = [0, 1.28, -0.22]
+        pedestalRoot.addChild(completionAnchor)
+
+        collectionSlotEntities.removeAll()
+        for slot in puzzle?.collectionSlotLayout ?? [] {
+            let marker = GeneratedAssetFactory.makeCollectionSlotMarker(slotID: slot.slotID)
+            marker.position = slot.position
+            marker.orientation = simd_quatf(
+                ix: slot.rotation.x,
+                iy: slot.rotation.y,
+                iz: slot.rotation.z,
+                r: slot.rotation.w
+            )
+            marker.scale = slot.scale
+            pedestalRoot.addChild(marker)
+            collectionSlotEntities[slot.slotID] = marker
+        }
+    }
+
+    private func buildGlass() {
+        let assembly = GeneratedAssetFactory.makeLookingGlass(portalRadius: portalRadius)
+        glassRoot = assembly.root
+        glassHandleHitTarget = assembly.handleHitTarget
+        portalDisk = assembly.portalDisk
+        portalDebugRing = assembly.debugRing
+        homeGlassTransform = assembly.homeTransform
+        portalDisk.components.set(PortalComponent(target: portalWorld))
+        portalDisk.isEnabled = false
+        glassRoot.transform = homeGlassTransform
+        pedestalRoot.addChild(glassRoot)
+    }
+
+    private func buildEnvironment() {
+        hiddenWorldRoot.addChild(GeneratedAssetFactory.makeWizardStudyEnvironment())
+    }
+
+    private func buildTargets() {
+        targetEntities.removeAll()
+
+        for item in puzzle?.targetItems ?? [] {
+            let root = Entity()
+            root.name = "target:\(item.itemID)"
+            root.transform = item.worldTransform.transform
+            root.components.set(
+                CollisionComponent(
+                    shapes: [.generateSphere(radius: item.boundsProfile.radius)],
+                    filter: CollisionFilter(group: GeneratedAssetFactory.hiddenTargetGroup, mask: .all)
+                )
+            )
+            root.components.set(InputTargetComponent())
+
+            let visual = GeneratedAssetFactory.makeTargetVisual(for: item.assetID)
+            visual.name = "visual:\(item.itemID)"
+            root.addChild(visual)
+
+            let highlight = GeneratedAssetFactory.makeSelectionHalo(radius: item.boundsProfile.radius, color: .clear)
+            highlight.name = "highlight:\(item.itemID)"
+            highlight.isEnabled = false
+            root.addChild(highlight)
+
+            let debugBounds = GeneratedAssetFactory.makeDebugBounds(radius: item.boundsProfile.radius)
+            debugBounds.name = "debug_bounds:\(item.itemID)"
+            debugBounds.isEnabled = false
+            root.addChild(debugBounds)
+
+            hiddenWorldRoot.addChild(root)
+            targetEntities[item.itemID] = TargetRuntime(
+                definition: item,
+                root: root,
+                visual: visual,
+                highlight: highlight,
+                debugBounds: debugBounds
+            )
+        }
+    }
+
+    private func configureAttachments(_ attachments: RealityViewAttachments) {
+        if let checklistEntity = attachments.entity(for: AttachmentID.checklist), checklistEntity.parent == nil {
+            checklistAnchor.addChild(checklistEntity)
+            checklistEntity.position = .zero
+        }
+
+        if let debugEntity = attachments.entity(for: AttachmentID.debug), debugEntity.parent == nil {
+            debugAnchor.addChild(debugEntity)
+            debugEntity.position = .zero
+        }
+
+        if let completionEntity = attachments.entity(for: AttachmentID.completion), completionEntity.parent == nil {
+            completionAnchor.addChild(completionEntity)
+            completionEntity.position = .zero
+        }
+
+        attachmentConfigured = true
+        updateAttachmentVisibility()
+    }
+
+    private func updateAttachmentVisibility() {
+        guard attachmentConfigured else {
+            return
+        }
+
+        checklistAnchor.isEnabled = runtimeMode == .playing || runtimeMode == .suspended
+        debugAnchor.isEnabled = true
+        completionAnchor.isEnabled = runtimeMode == .completed
+    }
+
+    private func updateDebugGeometryVisibility() {
+        portalDebugRing.isEnabled = debugOptions.showPortalCircle && isPortalVisible
+
+        for (itemID, target) in targetEntities {
+            target.debugBounds.isEnabled = debugOptions.showProjectedBounds && !foundItemIDs.contains(itemID)
+
+            if debugOptions.showEligibleTarget, itemID == currentEligibleTargetID {
+                setHighlight(target.highlight, color: .init(red: 1.0, green: 0.82, blue: 0.28, alpha: 0.28), enabled: true)
+            } else if debugOptions.showGazeTarget, itemID == currentGazeTargetID {
+                setHighlight(target.highlight, color: .init(red: 0.3, green: 0.74, blue: 1.0, alpha: 0.22), enabled: true)
+            } else {
+                setHighlight(target.highlight, color: .clear, enabled: false)
+            }
+        }
+    }
+
+    private func tick(deltaTime: TimeInterval) {
+        guard didAddRoot else {
+            return
+        }
+
+        if runtimeMode == .playing, isSceneActive {
+            elapsedTime += deltaTime
+        }
+
+        updatePortalState()
+        updateCurrentTargets()
+        updateDebugGeometryVisibility()
+    }
+
+    private func updatePortalState() {
+        let shouldShowPortal = glassState == .portalActive && runtimeMode == .playing && isSceneActive
+        portalDisk.isEnabled = shouldShowPortal
+    }
+
+    private func updateCurrentTargets() {
+        guard runtimeMode == .playing, isPortalVisible, let portalReference = currentPortalReference() else {
+            currentGazeTargetID = nil
+            currentEligibleTargetID = nil
+            currentEligibility = PortalEligibilitySnapshot(
+                targetID: nil,
+                targetName: nil,
+                overlapScore: 0,
+                centerInsidePortal: false,
+                passedOcclusion: false,
+                isAlreadyFound: false,
+                portalActive: portalDisk.isEnabled
+            )
+            return
+        }
+
+        let candidates = targetEntities.values.compactMap { target in
+            evaluateTarget(id: target.definition.itemID, portalReference: portalReference)
+        }
+
+        let gazeCandidate = candidates
+            .sorted {
+                if $0.overlapScore == $1.overlapScore {
+                    if $0.selectionPriority == $1.selectionPriority {
+                        if $0.depth == $1.depth {
+                            return $0.radialDistance < $1.radialDistance
+                        }
+                        return $0.depth < $1.depth
+                    }
+                    return $0.selectionPriority > $1.selectionPriority
+                }
+                return $0.overlapScore > $1.overlapScore
+            }
+            .first
+
+        currentGazeTargetID = gazeCandidate?.targetID
+
+        let eligibleCandidate = candidates
+            .filter {
+                $0.centerInsidePortal &&
+                $0.overlapScore >= (targetEntities[$0.targetID]?.definition.boundsProfile.minimumPortalOverlap ?? 0.5) &&
+                $0.passedOcclusion
+            }
+            .sorted {
+                let lhsIsGaze = $0.targetID == gazeCandidate?.targetID
+                let rhsIsGaze = $1.targetID == gazeCandidate?.targetID
+                if lhsIsGaze != rhsIsGaze {
+                    return lhsIsGaze
+                }
+                if $0.overlapScore == $1.overlapScore {
+                    if $0.depth == $1.depth {
+                        return $0.selectionPriority > $1.selectionPriority
+                    }
+                    return $0.depth < $1.depth
+                }
+                return $0.overlapScore > $1.overlapScore
+            }
+            .first
+
+        currentEligibleTargetID = eligibleCandidate?.targetID
+        currentEligibility = PortalEligibilitySnapshot(
+            targetID: eligibleCandidate?.targetID,
+            targetName: targetEntities[eligibleCandidate?.targetID ?? ""]?.definition.displayName,
+            overlapScore: eligibleCandidate?.overlapScore ?? 0,
+            centerInsidePortal: eligibleCandidate?.centerInsidePortal ?? false,
+            passedOcclusion: eligibleCandidate?.passedOcclusion ?? false,
+            isAlreadyFound: eligibleCandidate.map { foundItemIDs.contains($0.targetID) } ?? false,
+            portalActive: portalDisk.isEnabled
+        )
+    }
+
+    private func currentPortalReference() -> (entity: ModelEntity, sampleOrigin: SIMD3<Float>)? {
+        guard portalDisk.parent != nil else {
+            return nil
+        }
+        let sampleOrigin = portalDisk.position(relativeTo: nil)
+        return (portalDisk, sampleOrigin)
+    }
+
+    private func evaluateTarget(
+        id targetID: String,
+        portalReference: (entity: ModelEntity, sampleOrigin: SIMD3<Float>)
+    ) -> TargetEvaluation? {
+        guard let target = targetEntities[targetID], !foundItemIDs.contains(targetID) else {
+            return nil
+        }
+
+        let targetPosition = target.root.position(relativeTo: nil)
+        let localPosition = portalReference.entity.convert(position: targetPosition, from: nil)
+        let radialDistance = simd_length(SIMD2(localPosition.x, localPosition.y))
+        let centerInside = radialDistance <= portalRadius
+        let depth = -localPosition.z
+        guard depth > portalDepthGate else {
+            return nil
+        }
+
+        let projectedRadius = max(target.definition.boundsProfile.radius * 0.36 / max(depth, 0.25), 0.016)
+        let overlap = normalizedOverlap(
+            portalRadius: portalRadius,
+            distanceFromCenter: radialDistance,
+            projectedRadius: projectedRadius
+        )
+
+        let occlusionClear = isVisibleThroughPortal(
+            targetItemID: target.definition.itemID,
+            from: portalReference.sampleOrigin,
+            to: targetPosition
+        )
+
+        return TargetEvaluation(
+            targetID: target.definition.itemID,
+            overlapScore: overlap,
+            centerInsidePortal: centerInside,
+            passedOcclusion: occlusionClear,
+            depth: depth,
+            radialDistance: radialDistance,
+            selectionPriority: target.definition.selectionPriority
+        )
+    }
+
+    private func isVisibleThroughPortal(targetItemID: String, from start: SIMD3<Float>, to end: SIMD3<Float>) -> Bool {
+        guard let scene else {
+            return true
+        }
+
+        let hits = scene.raycast(
+            from: start,
+            to: end,
+            query: .nearest,
+            mask: [GeneratedAssetFactory.hiddenTargetGroup, GeneratedAssetFactory.hiddenOccluderGroup],
+            relativeTo: nil
+        )
+
+        guard let firstHit = hits.first else {
+            return true
+        }
+
+        return targetID(from: firstHit.entity) == targetItemID
+    }
+
+    private func normalizedOverlap(
+        portalRadius: Float,
+        distanceFromCenter: Float,
+        projectedRadius: Float
+    ) -> Float {
+        let overlapDistance = portalRadius + projectedRadius - distanceFromCenter
+        let normalized = overlapDistance / max(projectedRadius * 2, 0.0001)
+        return max(0, min(1, normalized))
+    }
+
+    private func collectTarget(id: String, animated: Bool) {
+        guard let target = targetEntities[id], !foundItemIDs.contains(id) else {
+            return
+        }
+
+        foundItemIDs.insert(id)
+        lastAssignedSlotID = target.definition.pedestalSlotID
+        latestFeedbackMessage = "Collected \(target.definition.displayName)."
+        playAudioCue(.validSelection, entity: target.root)
+
+        target.root.isEnabled = false
+        spawnCollectedDisplay(from: target, animated: animated)
+        updateCurrentTargets()
+
+        if foundItemIDs.count == requiredCount {
+            completePuzzle()
+        }
+    }
+
+    private func spawnCollectedDisplay(from target: TargetRuntime, animated: Bool) {
+        guard let slotEntity = collectionSlotEntities[target.definition.pedestalSlotID] else {
+            return
+        }
+
+        playAudioCue(.extraction, entity: slotEntity)
+
+        let display = target.visual.clone(recursive: true)
+        display.name = "collected:\(target.definition.itemID)"
+        presentationRoot.addChild(display)
+
+        let startPosition = target.root.position(relativeTo: nil)
+        display.position = presentationRoot.convert(position: startPosition, from: nil)
+        display.orientation = target.root.orientation(relativeTo: presentationRoot)
+
+        let slotPosition = slotEntity.position(relativeTo: presentationRoot)
+        let slotTransform = Transform(
+            scale: slotEntity.scale,
+            rotation: slotEntity.orientation(relativeTo: presentationRoot),
+            translation: slotPosition + SIMD3<Float>(0, debugOptions.showPedestalSlotIDs ? 0.05 : 0.03, 0)
+        )
+
+        if animated {
+            display.move(to: slotTransform, relativeTo: presentationRoot, duration: 0.55, timingFunction: .easeInOut)
+        } else {
+            display.transform = slotTransform
+        }
+    }
+
+    private func completePuzzle() {
+        guard runtimeMode == .playing, let currentContext, let puzzle else {
+            return
+        }
+
+        runtimeMode = .completed
+        glassState = .idleOnPedestal
+        portalDisk.isEnabled = false
+        glassHandleHitTarget.isEnabled = false
+        interactionLocked = true
+        latestFeedbackMessage = "Puzzle complete."
+        playAudioCue(.completion, entity: completionAnchor)
+        glassRoot.move(to: homeGlassTransform, relativeTo: pedestalRoot, duration: 0.35, timingFunction: .easeInOut)
+
+        if !completionWasRecorded {
+            let summary = CompletionSummary(
+                puzzleID: puzzle.id,
+                puzzleName: puzzle.displayName,
+                launchPath: currentContext.launchPath,
+                elapsedTime: elapsedTime,
+                foundCount: foundItemIDs.count,
+                dailyKey: currentContext.dailyKey
+            )
+            appModel?.recordCompletion(summary)
+            completionWasRecorded = true
+        }
+
+        updateAttachmentVisibility()
+    }
+
+    private func handleTrackingStateUpdate(_ state: SceneEvents.TrackingStateUpdate.State) {
+        switch state {
+        case .tracked:
+            trackingStateText = "Tracked"
+            if runtimeMode == .suspended, isSceneActive {
+                runtimeMode = .playing
+                latestFeedbackMessage = "Tracking restored. Pick up the glass to continue."
+            }
+        case .orientationTracked:
+            trackingStateText = "Limited"
+            suspendInteraction(reason: "Tracking limited")
+        case .untracked:
+            trackingStateText = "Untracked"
+            suspendInteraction(reason: "Tracking lost")
+        @unknown default:
+            trackingStateText = "Unknown"
+            suspendInteraction(reason: "Tracking unavailable")
+        }
+    }
+
+    private func handleManipulationWillBegin(for entity: Entity) {
+        guard entity === glassRoot, runtimeMode == .playing, isSceneActive, !interactionLocked else {
+            return
+        }
+
+        glassState = .grabbed
+        playAudioCue(.glassPickup, entity: glassRoot)
+        glassState = .portalActive
+        playAudioCue(.portalActivation, entity: portalDisk)
+        latestFeedbackMessage = "Portal active. Center a target in the lens, then pinch."
+    }
+
+    private func handleManipulationWillRelease(for entity: Entity) {
+        guard entity === glassRoot else {
+            return
+        }
+        returnGlassToPedestal(animated: true)
+    }
+
+    private func handleManipulationWillEnd(for entity: Entity) {
+        guard entity === glassRoot else {
+            return
+        }
+        currentGazeTargetID = nil
+        currentEligibleTargetID = nil
+    }
+
+    private func returnGlassToPedestal(animated: Bool) {
+        interactionLocked = true
+        glassState = .releasedReturning
+        portalDisk.isEnabled = false
+        latestFeedbackMessage = "Portal closed."
+        glassHandleHitTarget.isEnabled = false
+        currentGazeTargetID = nil
+        currentEligibleTargetID = nil
+
+        if animated {
+            glassRoot.move(to: homeGlassTransform, relativeTo: pedestalRoot, duration: 0.35, timingFunction: .easeInOut)
+        } else {
+            glassRoot.transform = homeGlassTransform
+        }
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(animated ? 380 : 20))
+            guard let self else { return }
+            self.glassState = self.runtimeMode == .playing ? .hoverAvailable : .idleOnPedestal
+            self.glassHandleHitTarget.isEnabled = self.runtimeMode == .playing
+            self.interactionLocked = false
+        }
+    }
+
+    private func suspendInteraction(reason: String) {
+        if runtimeMode == .completed {
+            return
+        }
+        runtimeMode = .suspended
+        latestFeedbackMessage = reason
+        returnGlassToPedestal(animated: false)
+    }
+
+    private func clearHierarchy() {
+        for child in Array(root.children) {
+            child.removeFromParent()
+        }
+        targetEntities.removeAll()
+        collectionSlotEntities.removeAll()
+        puzzle = nil
+        scene = root.scene ?? scene
+    }
+
+    private func targetID(from entity: Entity) -> String? {
+        if entity.name.hasPrefix("target:") {
+            return String(entity.name.dropFirst("target:".count))
+        }
+
+        var currentParent = entity.parent
+        while let parent = currentParent {
+            if parent.name.hasPrefix("target:") {
+                return String(parent.name.dropFirst("target:".count))
+            }
+            currentParent = parent.parent
+        }
+
+        return nil
+    }
+
+    private func isPortalEntity(_ entity: Entity) -> Bool {
+        entity === portalDisk || entity.parent === portalDisk
+    }
+
+    private func setHighlight(_ entity: Entity, color: UIColor, enabled: Bool) {
+        guard let modelEntity = entity as? ModelEntity else {
+            entity.isEnabled = enabled
+            return
+        }
+
+        if var model = modelEntity.components[ModelComponent.self] {
+            model.materials = [GeneratedAssetFactory.unlitMaterial(color)]
+            modelEntity.components.set(model)
+        }
+        entity.isEnabled = enabled
+    }
+
+    private func symbolName(for silhouetteAssetID: String) -> String {
+        switch silhouetteAssetID {
+        case "feather_quill", "feather":
+            return "feather"
+        case "hourglass":
+            return "hourglass"
+        case "crystal_ball", "sparkles":
+            return "sparkles"
+        case "potion_bottle", "drop.fill":
+            return "drop.fill"
+        case "spell_book", "book.closed.fill":
+            return "book.closed.fill"
+        case "key", "key.fill":
+            return "key.fill"
+        case "candle", "flame.fill":
+            return "flame.fill"
+        case "wand", "wand.and.stars":
+            return "wand.and.stars"
+        case "moon_charm", "moon.stars.fill":
+            return "moon.stars.fill"
+        case "tiny_dragon_figurine", "sparkle":
+            return "sparkle"
+        default:
+            return "circle.fill"
+        }
+    }
+
+    private func playAudioCue(_ cue: AudioFeedbackController.Cue, entity: Entity? = nil) {
+        audioFeedback.play(cue, on: entity)
+        lastAudioCueName = cue.debugLabel
+    }
+}
