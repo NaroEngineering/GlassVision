@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ChecklistPanelView: View {
     @ObservedObject var runtime: GlassVisionRuntime
+    let onReturnToMenu: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -43,6 +44,10 @@ struct ChecklistPanelView: View {
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
+
+            Button("Back To Menu", action: onReturnToMenu)
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(18)
         .frame(width: 360)

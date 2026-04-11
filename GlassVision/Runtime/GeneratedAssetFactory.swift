@@ -14,6 +14,23 @@ enum GeneratedAssetFactory {
     static let hiddenTargetGroup = CollisionGroup(rawValue: 1 << 2)
     static let hiddenOccluderGroup = CollisionGroup(rawValue: 1 << 3)
     static let portalInteractionGroup = CollisionGroup(rawValue: 1 << 4)
+    private static let bundledObjectScale: Float = 1.0 / 5.0
+    private static var loadedObjectTemplates: [String: Entity] = [:]
+    private static var missingObjectNames: Set<String> = []
+
+    // Temporary mapping until puzzle JSON is updated to point directly at object file names.
+    private static let objectResourceNameByAssetID: [String: String] = [
+        "feather_quill": "CrystalLotus",
+        "hourglass": "GemCoin",
+        "crystal_ball": "goldendice",
+        "potion_bottle": "MagmaExplosion",
+        "spell_book": "ufo",
+        "key": "car-coupe-blue",
+        "candle": "car-coupe-green",
+        "wand": "car-coupe-citrus",
+        "moon_charm": "GemCoin",
+        "tiny_dragon_figurine": "ufo"
+    ]
 
     struct LookingGlassAssembly {
         let root: Entity
@@ -31,6 +48,15 @@ enum GeneratedAssetFactory {
         manipulation.releaseBehavior = .stay
         manipulation.audioConfiguration = .none
         root.components.set(manipulation)
+        root.components.set(InputTargetComponent())
+        root.components.set(
+            CollisionComponent(
+                shapes: [
+                    .generateCapsule(height: 0.40, radius: portalRadius + 0.05)
+                ],
+                filter: CollisionFilter(group: portalInteractionGroup, mask: .all)
+            )
+        )
 
         let frame = ModelEntity(
             mesh: .generateCylinder(height: 0.012, radius: portalRadius + 0.028),
@@ -102,7 +128,6 @@ enum GeneratedAssetFactory {
             )
         )
         handleHitTarget.components.set(InputTargetComponent())
-        handleHitTarget.components.set(HoverEffectComponent(.highlight(.default)))
         handleHitTarget.components.set(ManipulationComponent.HitTarget(redirectedEntity: root))
         root.addChild(handleHitTarget)
 
@@ -195,6 +220,10 @@ enum GeneratedAssetFactory {
     }
 
     static func makeTargetVisual(for assetID: String) -> Entity {
+        if let loadedObject = loadBundledObject(for: assetID) {
+            return loadedObject
+        }
+
         switch assetID {
         case "feather_quill":
             return makeQuill()
@@ -219,7 +248,7 @@ enum GeneratedAssetFactory {
         default:
             return ModelEntity(
                 mesh: .generateBox(size: 0.12, cornerRadius: 0.01),
-                materials: [simpleMaterial(.magenta, metallic: false)]
+                materials: [simpleMaterial(.init(red: 0.66, green: 0.66, blue: 0.66, alpha: 1.0), metallic: false)]
             )
         }
     }
@@ -611,5 +640,49 @@ enum GeneratedAssetFactory {
         ]
         let index = Int(abs(seed * 1000).rounded()) % colors.count
         return colors[index]
+    }
+
+    private static func loadBundledObject(for assetID: String) -> Entity? {
+        let explicitName = objectResourceNameByAssetID[assetID]
+        let candidates = [explicitName, assetID]
+            .compactMap { $0 }
+            .uniqued()
+
+        for resourceName in candidates {
+            if let cachedTemplate = loadedObjectTemplates[resourceName] {
+                let clone = cachedTemplate.clone(recursive: true)
+                clone.name = "asset:\(assetID)"
+                clone.scale *= SIMD3<Float>(repeating: bundledObjectScale)
+                return clone
+            }
+
+            let urls = [
+                Bundle.main.url(forResource: resourceName, withExtension: "usdz", subdirectory: "Objects"),
+                Bundle.main.url(forResource: resourceName, withExtension: "usdz", subdirectory: "objects"),
+                Bundle.main.url(forResource: resourceName, withExtension: "usdz")
+            ].compactMap { $0 }
+
+            for url in urls {
+                if let loaded = (try? Entity.load(contentsOf: url)) ?? (try? ModelEntity.loadModel(contentsOf: url)) {
+                    loadedObjectTemplates[resourceName] = loaded
+                    let clone = loaded.clone(recursive: true)
+                    clone.name = "asset:\(assetID)"
+                    clone.scale *= SIMD3<Float>(repeating: bundledObjectScale)
+                    return clone
+                }
+            }
+        }
+
+        if missingObjectNames.insert(assetID).inserted {
+            print("GlassVision: missing or failed USDZ load for assetID '\(assetID)'")
+        }
+        return nil
+    }
+}
+
+private extension Array where Element: Hashable {
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
     }
 }

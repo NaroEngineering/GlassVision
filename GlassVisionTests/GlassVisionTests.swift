@@ -54,14 +54,17 @@ struct GlassVisionTests {
     @Test func dailyResolverResolvesWizardStudyForMVP() async throws {
         let resolver = DailyPuzzleResolver()
         let repository = PuzzleRepository()
+        let date = Date(timeIntervalSince1970: 0)
 
         let context = try resolver.resolveLaunchContext(
-            for: Date(timeIntervalSince1970: 0),
+            for: date,
             repository: repository
         )
 
+        let expectedID = PuzzleDefinition.randomObjectsPuzzleID(for: resolver.dailyKey(for: date))
         #expect(context.launchPath == .daily)
-        #expect(context.puzzleID == "wizard_study_001")
+        #expect(context.puzzleID == expectedID)
+        #expect(repository.loadPuzzle(id: context.puzzleID) != nil)
     }
 
     @Test func wizardStudyPuzzleContainsTenTargets() async throws {

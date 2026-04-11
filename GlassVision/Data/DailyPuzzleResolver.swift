@@ -32,14 +32,17 @@ struct DailyPuzzleResolver {
         for date: Date,
         repository: PuzzleRepository
     ) throws -> PuzzleLaunchContext {
-        guard let puzzle = repository.loadPuzzle(id: PuzzleDefinition.defaultPuzzleID) ?? repository.loadAll().first else {
+        let key = dailyKey(for: date)
+        let randomPuzzleID = PuzzleDefinition.randomObjectsPuzzleID(for: key)
+
+        guard repository.loadPuzzle(id: randomPuzzleID) != nil else {
             throw ResolutionError.noPuzzlesAvailable
         }
 
         return PuzzleLaunchContext(
-            puzzleID: puzzle.id,
+            puzzleID: randomPuzzleID,
             launchPath: .daily,
-            dailyKey: dailyKey(for: date)
+            dailyKey: key
         )
     }
 }

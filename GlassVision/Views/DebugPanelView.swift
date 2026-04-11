@@ -12,7 +12,7 @@ struct DebugPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Debug")
+            Text("Look Target")
                 .font(.headline)
 
             Toggle("Portal Circle", isOn: binding(\.showPortalCircle))
@@ -26,6 +26,7 @@ struct DebugPanelView: View {
             Text("Targeted: \(runtime.lastTargetedEntityName)")
             Text("Gaze: \(runtime.currentGazeTargetName)")
             Text("Eligible: \(runtime.currentEligibleTargetName)")
+            Text("Armed: \(runtime.currentArmedTargetName)")
             Text("Eligible State: \(runtime.currentEligibility?.targetID == nil ? "No" : "Yes")")
             Text("Overlap: \(runtime.currentOverlapText)")
             Text("Occlusion: \(runtime.currentEligibility?.passedOcclusion == true ? "Clear" : "Blocked")")

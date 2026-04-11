@@ -54,6 +54,11 @@ struct PuzzleLaunchContext: Identifiable, Equatable, Sendable {
 
 struct PuzzleDefinition: Codable, Identifiable, Hashable, Sendable {
     static let defaultPuzzleID = "wizard_study_001"
+    static let randomObjectsPrefix = "random_objects_"
+
+    static func randomObjectsPuzzleID(for dailyKey: String) -> String {
+        "\(randomObjectsPrefix)\(dailyKey)"
+    }
 
     let id: String
     let displayName: String

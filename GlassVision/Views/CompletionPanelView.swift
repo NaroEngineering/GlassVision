@@ -19,7 +19,7 @@ struct CompletionPanelView: View {
 
             Text(runtime.completionTitle)
                 .font(.headline)
-            Text("10 / 10 found")
+            Text("\(runtime.foundCount) / \(runtime.requiredCount) found")
                 .font(.subheadline.weight(.semibold))
             Text("Time \(runtime.elapsedTime.glassVisionClockString)")
                 .font(.body.monospacedDigit())

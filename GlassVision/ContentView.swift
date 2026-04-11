@@ -12,191 +12,276 @@ struct ContentView: View {
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.scenePhase) private var scenePhase
+    @State private var pendingLaunchContext: PuzzleLaunchContext?
+    private let sectionCornerRadius: CGFloat = 14
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.12, green: 0.09, blue: 0.06), Color(red: 0.28, green: 0.18, blue: 0.11)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-
+        NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    header
-                    launchCards
-                    librarySection
-                    statsSection
+                VStack(alignment: .leading, spacing: 18) {
+                    headerSection
+                    startSection
+                    if appModel.immersiveSpaceState == .inTransition {
+                        transitionStatusSection
+                    }
+                    mainSection
+
                     if let latestErrorMessage = appModel.latestErrorMessage {
-                        Text(latestErrorMessage)
-                            .font(.callout)
+                        Label(latestErrorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.body)
                             .foregroundStyle(.orange)
+                            .padding(12)
+                            .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: sectionCornerRadius, style: .continuous))
                     }
                 }
-                .padding(28)
+                .padding(18)
+                .frame(maxWidth: 920, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
+            .navigationTitle("Glass Vision")
+        }
+        .ornament(visibility: appModel.immersiveSpaceState == .open ? .visible : .hidden, attachmentAnchor: .scene(.bottom)) {
+            Button("Close Session") {
+                Task { @MainActor in
+                    await closeImmersiveSpace()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .glassBackgroundEffect()
         }
         .onChange(of: scenePhase) { _, newValue in
             appModel.sceneIsActive = newValue == .active
         }
-    }
+        .onChange(of: appModel.immersiveSpaceState) { _, newValue in
+            guard newValue == .closed, let queuedContext = pendingLaunchContext else {
+                return
+            }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Glass Vision")
-                .font(.system(size: 42, weight: .bold, design: .serif))
-                .foregroundStyle(.white)
-
-            Text("Mixed-reality hidden objects through a handheld magical lens. MVP ships with Wizard Study as both the daily puzzle and the first library puzzle.")
-                .font(.title3)
-                .foregroundStyle(.white.opacity(0.82))
-                .fixedSize(horizontal: false, vertical: true)
+            pendingLaunchContext = nil
+            appModel.activeLaunchContext = queuedContext
+            Task { @MainActor in
+                await openImmersiveIfPossible()
+            }
         }
-        .padding(24)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
-        )
     }
 
-    private var launchCards: some View {
-        HStack(spacing: 18) {
-            launchCard(
-                title: "Daily Puzzle",
-                subtitle: appModel.isTodayDailyComplete ? "Completed today" : "Local daily based on the device date",
-                buttonTitle: appModel.immersiveSpaceState == .open ? "Close Active Session" : "Play Daily Puzzle",
-                action: {
-                    if appModel.immersiveSpaceState == .open {
-                        await closeImmersiveSpace()
-                    } else {
-                        appModel.prepareDailyLaunch()
-                        await openImmersiveIfPossible()
-                    }
-                }
-            )
+    private var selectedEntry: PuzzleLibraryEntry? {
+        appModel.libraryEntries.first { $0.id == appModel.selectedLibraryPuzzleID }
+    }
 
-            launchCard(
-                title: "Puzzle Select",
-                subtitle: "Choose authored puzzles from the library",
-                buttonTitle: "Play Selected Puzzle",
-                action: {
-                    appModel.prepareLibraryLaunch()
-                    await openImmersiveIfPossible()
+    private var headerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Find Hidden Objects")
+                .font(.largeTitle.weight(.semibold))
+
+            Text("Use the looking glass to reveal hidden items and complete each scene.")
+                .font(.title3.weight(.regular))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let selectedEntry {
+                HStack(spacing: 10) {
+                    Label(selectedEntry.title, systemImage: "sparkles")
+                    Text(selectedEntry.difficulty.displayName)
+                        .foregroundStyle(.secondary)
                 }
-            )
+                .font(.subheadline.weight(.semibold))
+                .padding(.top, 4)
+            }
+        }
+        .padding(18)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: sectionCornerRadius, style: .continuous))
+    }
+
+    private var startSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Start Playing")
+                .font(.title3.weight(.semibold))
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { @MainActor in
+                        await launchDaily()
+                    }
+                } label: {
+                    Label("Play Daily Puzzle", systemImage: "sun.max.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(appModel.immersiveSpaceState == .inTransition)
+
+                Button {
+                    Task { @MainActor in
+                        await launchSelectedPuzzle()
+                    }
+                } label: {
+                    Label("Play Selected Puzzle", systemImage: "wand.and.stars")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(appModel.immersiveSpaceState == .inTransition)
+            }
+
+            HStack(spacing: 12) {
+                Text("Daily: \(appModel.isTodayDailyComplete ? "Completed" : "Available")")
+                Text("Selected: \(selectedEntry?.title ?? "None")")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: sectionCornerRadius, style: .continuous))
+    }
+
+    private var transitionStatusSection: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.regular)
+            Text("Loading immersive experience...")
+                .font(.subheadline.weight(.semibold))
+            Spacer()
+        }
+        .padding(14)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: sectionCornerRadius, style: .continuous))
+    }
+
+    private var mainSection: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 14) {
+                librarySection
+                progressPanel
+            }
+            VStack(alignment: .leading, spacing: 14) {
+                librarySection
+                progressPanel
+            }
         }
     }
 
     private var librarySection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("Puzzle Library")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
-
+                .font(.title3.weight(.semibold))
             ForEach(appModel.libraryEntries) { entry in
                 Button {
                     appModel.selectedLibraryPuzzleID = entry.id
                 } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(entry.title)
-                                .font(.headline)
-                                .foregroundStyle(.white)
-                            Text("\(entry.theme.replacingOccurrences(of: "_", with: " ").capitalized) • \(entry.difficulty.displayName)")
-                                .font(.subheadline)
-                                .foregroundStyle(.white.opacity(0.72))
-                        }
-
-                        Spacer()
-
-                        if let status = entry.completionStatus {
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text("Best \(status.bestCompletionTime?.glassVisionClockString ?? "--:--.--")")
-                                Text("\(status.totalCompletions) completions")
-                            }
-                            .font(.footnote.monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.86))
-                        } else {
-                            Text("New")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.yellow)
-                        }
-                    }
-                    .padding(18)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(appModel.selectedLibraryPuzzleID == entry.id ? Color.white.opacity(0.16) : Color.white.opacity(0.07))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(appModel.selectedLibraryPuzzleID == entry.id ? Color.yellow.opacity(0.6) : Color.white.opacity(0.1), lineWidth: 1)
-                    )
+                    puzzleRow(for: entry)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(appModel.selectedLibraryPuzzleID == entry.id ? .white.opacity(0.18) : .white.opacity(0.08))
+                        )
                 }
                 .buttonStyle(.plain)
             }
         }
-    }
-
-    private var statsSection: some View {
-        HStack(spacing: 18) {
-            statBlock(title: "Total Completions", value: "\(appModel.statsSnapshot.totalPuzzleCompletions)")
-            statBlock(title: "Daily Status", value: appModel.isTodayDailyComplete ? "Done" : "Open")
-            statBlock(
-                title: "Selected Puzzle",
-                value: appModel.libraryEntries.first(where: { $0.id == appModel.selectedLibraryPuzzleID })?.title ?? "Wizard Study"
-            )
-        }
-    }
-
-    private func launchCard(
-        title: String,
-        subtitle: String,
-        buttonTitle: String,
-        action: @escaping @MainActor () async -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.74))
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 0)
-
-            Button(buttonTitle) {
-                Task { @MainActor in
-                    await action()
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.yellow.opacity(0.9))
-            .disabled(appModel.immersiveSpaceState == .inTransition)
-        }
-        .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
-        .padding(22)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
-        )
-    }
-
-    private func statBlock(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.7))
-            Text(value)
-                .font(.title3.monospacedDigit().weight(.bold))
-                .foregroundStyle(.white)
-        }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(16)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: sectionCornerRadius, style: .continuous))
+    }
+
+    private var progressPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Progress")
+                .font(.title3.weight(.semibold))
+
+            statRow(title: "Total Completions", value: "\(appModel.statsSnapshot.totalPuzzleCompletions)")
+            statRow(title: "Today", value: appModel.isTodayDailyComplete ? "Completed" : "Not Completed")
+            statRow(title: "Best Time", value: bestTimeText)
+            statRow(title: "Selected", value: selectedEntry?.title ?? "None")
+
+            if appModel.immersiveSpaceState == .open {
+                Text("Session is active. Use the Close Session control below.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: 330, alignment: .leading)
+        .padding(16)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: sectionCornerRadius, style: .continuous))
+    }
+
+    private func puzzleRow(for entry: PuzzleLibraryEntry) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.title)
+                    .font(.body.weight(.semibold))
+                Text("\(entry.theme.replacingOccurrences(of: "_", with: " ").capitalized) • \(entry.difficulty.displayName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if appModel.selectedLibraryPuzzleID == entry.id {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.tint)
+            }
+            if let status = entry.completionStatus {
+                Text(status.bestCompletionTime?.glassVisionClockString ?? "--:--.--")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("New")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tint)
+            }
+        }
+    }
+
+    private func statRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.subheadline.monospacedDigit().weight(.semibold))
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private var bestTimeText: String {
+        guard let selectedID = selectedEntry?.id,
+              let record = appModel.statsSnapshot.perPuzzle[selectedID],
+              let best = record.bestCompletionTime else {
+            return "--:--.--"
+        }
+        return best.glassVisionClockString
+    }
+
+    @MainActor
+    private func launchDaily() async {
+        appModel.prepareDailyLaunch()
+        guard let launchContext = appModel.activeLaunchContext else {
+            return
+        }
+
+        if appModel.immersiveSpaceState == .open || appModel.immersiveSpaceState == .inTransition {
+            pendingLaunchContext = launchContext
+            await closeImmersiveSpace()
+        } else {
+            await openImmersiveIfPossible()
+        }
+    }
+
+    @MainActor
+    private func launchSelectedPuzzle() async {
+        appModel.prepareLibraryLaunch()
+        guard let launchContext = appModel.activeLaunchContext else {
+            return
+        }
+
+        if appModel.immersiveSpaceState == .open || appModel.immersiveSpaceState == .inTransition {
+            pendingLaunchContext = launchContext
+            await closeImmersiveSpace()
+        } else {
+            await openImmersiveIfPossible()
+        }
     }
 
     @MainActor
@@ -216,7 +301,7 @@ struct ContentView: View {
         case .userCancelled, .error:
             fallthrough
         @unknown default:
-            appModel.immersiveSpaceState = .closed
+            appModel.handleImmersiveClosed()
             appModel.latestErrorMessage = "The immersive space could not be opened."
         }
     }
@@ -229,5 +314,9 @@ struct ContentView: View {
 
         appModel.immersiveSpaceState = .inTransition
         await dismissImmersiveSpace()
+
+        if appModel.immersiveSpaceState == .inTransition {
+            appModel.handleImmersiveClosed()
+        }
     }
 }

@@ -22,11 +22,18 @@ struct ImmersiveView: View {
             runtime.update(content: &content, attachments: attachments, appModel: appModel)
         } attachments: {
             Attachment(id: GlassVisionRuntime.AttachmentID.checklist) {
-                ChecklistPanelView(runtime: runtime)
-            }
-
-            Attachment(id: GlassVisionRuntime.AttachmentID.debug) {
-                DebugPanelView(runtime: runtime)
+                ChecklistPanelView(
+                    runtime: runtime,
+                    onReturnToMenu: {
+                        Task { @MainActor in
+                            appModel.immersiveSpaceState = .inTransition
+                            await dismissImmersiveSpace()
+                            if appModel.immersiveSpaceState == .inTransition {
+                                appModel.handleImmersiveClosed()
+                            }
+                        }
+                    }
+                )
             }
 
             Attachment(id: GlassVisionRuntime.AttachmentID.completion) {
@@ -39,9 +46,16 @@ struct ImmersiveView: View {
                         Task { @MainActor in
                             appModel.immersiveSpaceState = .inTransition
                             await dismissImmersiveSpace()
+                            if appModel.immersiveSpaceState == .inTransition {
+                                appModel.handleImmersiveClosed()
+                            }
                         }
                     }
                 )
+            }
+
+            Attachment(id: GlassVisionRuntime.AttachmentID.debug) {
+                DebugPanelView(runtime: runtime)
             }
         }
         .gesture(
@@ -49,6 +63,12 @@ struct ImmersiveView: View {
                 .targetedToAnyEntity()
                 .onEnded { value in
                     runtime.handlePinchConfirmation(on: value.entity)
+                }
+        )
+        .simultaneousGesture(
+            SpatialTapGesture()
+                .onEnded { _ in
+                    runtime.handlePinchConfirmation(on: nil)
                 }
         )
         .onDisappear {

@@ -16,7 +16,6 @@ struct GlassVisionApp: App {
             ContentView()
                 .environmentObject(appModel)
         }
-        .windowStyle(.volumetric)
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveView()

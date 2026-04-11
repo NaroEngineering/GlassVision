@@ -40,7 +40,7 @@ final class GlassVisionRuntime: ObservableObject {
         var showPortalCircle = false
         var showProjectedBounds = false
         var showGazeTarget = true
-        var showEligibleTarget = true
+        var showEligibleTarget = false
         var showPedestalSlotIDs = false
     }
 
@@ -70,6 +70,7 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private var sceneSubscriptions: [EventSubscription] = []
+    private var subscribedSceneID: ObjectIdentifier?
     private var sessionAnchor = AnchorEntity(world: .zero)
     private var root = Entity()
     private var presentationRoot = Entity()
@@ -95,10 +96,19 @@ final class GlassVisionRuntime: ObservableObject {
     private var completionWasRecorded = false
     private var isSceneActive = true
     private var interactionLocked = false
+    private var isGlassHeld = false
     private var portalRadius: Float = 0.13
-    private var portalDepthGate: Float = 0.04
+    private let portalActivationDistanceThreshold: Float = 0.055
+    private let glassAutoDockDistanceThreshold: Float = 0.06
+    private let pinchDebounceInterval: TimeInterval = 0.25
+    private let collectedDisplayScaleFactor: Float = 0.1
     private var homeGlassTransform = Transform.identity
     private let audioFeedback = AudioFeedbackController()
+    private var lastPinchEventDate: Date = .distantPast
+    private var pendingArmedTargetID: String?
+    private var pendingArmedTargetStartDate: Date = .distantPast
+    private var armedTargetID: String?
+    private var armedTargetDate: Date = .distantPast
 
     @Published var runtimeMode: RuntimeMode = .unconfigured
     @Published var glassState: LookingGlassState = .idleOnPedestal
@@ -146,8 +156,12 @@ final class GlassVisionRuntime: ObservableObject {
         targetEntities[currentEligibleTargetID ?? ""]?.definition.displayName ?? "None"
     }
 
+    var currentArmedTargetName: String {
+        targetEntities[armedTargetID ?? ""]?.definition.displayName ?? "None"
+    }
+
     var currentOverlapText: String {
-        String(format: "%.2f", currentEligibility?.overlapScore ?? 0)
+        String(format: "%.2f", Double(currentEligibility?.overlapScore ?? 0.0))
     }
 
     var isPortalVisible: Bool {
@@ -170,12 +184,14 @@ final class GlassVisionRuntime: ObservableObject {
             sessionAnchor.addChild(root)
             content.add(sessionAnchor)
             didAddRoot = true
-            installSubscriptions(content: &content)
+        } else if sessionAnchor.scene == nil {
+            content.add(sessionAnchor)
         }
 
         self.appModel = appModel
         isSceneActive = appModel.sceneIsActive
         scene = root.scene
+        ensureSceneSubscriptions(content: &content)
         configureAttachments(attachments)
 
         if currentSessionID != appModel.activeLaunchContext?.id {
@@ -193,6 +209,7 @@ final class GlassVisionRuntime: ObservableObject {
         self.appModel = appModel
         scene = root.scene ?? scene
         isSceneActive = appModel.sceneIsActive
+        ensureSceneSubscriptions(content: &content)
         configureAttachments(attachments)
 
         if currentSessionID != appModel.activeLaunchContext?.id {
@@ -203,34 +220,72 @@ final class GlassVisionRuntime: ObservableObject {
         updateDebugGeometryVisibility()
     }
 
-    func handlePinchConfirmation(on entity: Entity) {
-        lastTargetedEntityName = entity.name.isEmpty ? "Unnamed Entity" : entity.name
-
+    func handlePinchConfirmationFromGaze() {
+        lastTargetedEntityName = "Air Pinch"
         guard runtimeMode == .playing, isPortalVisible, !interactionLocked else {
+            logPinchState(reason: "rejected: portal-not-ready", targetedEntity: nil)
             latestFeedbackMessage = "The portal is not ready for collection."
             playAudioCue(.invalidSelection)
             return
         }
 
-        guard isPortalEntity(entity) || targetID(from: entity) != nil else {
-            latestFeedbackMessage = "Only the lens reveals collectible targets."
+        guard let candidateID = bestPinchCandidateID() else {
+            logPinchState(reason: "rejected: no-best-candidate", targetedEntity: nil)
+            latestFeedbackMessage = "Center a valid target in the lens, then pinch."
             playAudioCue(.invalidSelection)
             return
         }
 
-        if let tappedTargetID = targetID(from: entity),
-           let portalReference = currentPortalReference(),
-           let tappedEvaluation = evaluateTarget(id: tappedTargetID, portalReference: portalReference),
-           tappedEvaluation.centerInsidePortal,
-           tappedEvaluation.passedOcclusion,
-           tappedEvaluation.overlapScore >= (targetEntities[tappedTargetID]?.definition.boundsProfile.minimumPortalOverlap ?? 0.5) {
-            collectTarget(id: tappedTargetID, animated: true)
-        } else if isPortalEntity(entity), let candidateID = currentEligibleTargetID {
-            collectTarget(id: candidateID, animated: true)
-        } else {
-            latestFeedbackMessage = "No valid collectible is currently eligible."
-            playAudioCue(.invalidSelection)
+        logPinchState(reason: "collect-from-gaze", targetedEntity: nil, candidateID: candidateID)
+        collectTarget(id: candidateID, animated: true)
+    }
+
+    func handlePinchConfirmation(on targetedEntity: Entity?) {
+        guard shouldProcessPinchEvent() else {
+            logPinchState(reason: "ignored: debounce", targetedEntity: targetedEntity)
+            return
         }
+
+        if let targetedEntity, let targetedID = targetID(from: targetedEntity) {
+            lastTargetedEntityName = targetedEntity.name
+
+            guard runtimeMode == .playing, isPortalVisible, !interactionLocked else {
+                logPinchState(reason: "rejected: target-tap-portal-not-ready", targetedEntity: targetedEntity)
+                latestFeedbackMessage = "The portal is not ready for collection."
+                playAudioCue(.invalidSelection)
+                return
+            }
+
+            if foundItemIDs.contains(targetedID) {
+                logPinchState(reason: "rejected: target-already-found", targetedEntity: targetedEntity, candidateID: targetedID)
+                latestFeedbackMessage = "That item is already collected."
+                playAudioCue(.invalidSelection)
+                return
+            }
+
+            guard let candidateID = bestPinchCandidateID(), candidateID == targetedID else {
+                logPinchState(reason: "rejected: target-mismatch-with-armed", targetedEntity: targetedEntity)
+                latestFeedbackMessage = "Pinch the highlighted target in the lens."
+                playAudioCue(.invalidSelection)
+                return
+            }
+
+            logPinchState(reason: "collect-from-target-tap", targetedEntity: targetedEntity, candidateID: targetedID)
+            collectTarget(id: targetedID, animated: true)
+            return
+        }
+
+        if let targetedEntity,
+           isPortalEntity(targetedEntity),
+           let candidateID = bestPinchCandidateID() {
+            lastTargetedEntityName = targetedEntity.name
+            logPinchState(reason: "collect-from-portal-tap", targetedEntity: targetedEntity, candidateID: candidateID)
+            collectTarget(id: candidateID, animated: true)
+            return
+        }
+
+        logPinchState(reason: "fallthrough-to-gaze", targetedEntity: targetedEntity)
+        handlePinchConfirmationFromGaze()
     }
 
     func handleScenePhaseChange(_ scenePhase: ScenePhase) {
@@ -239,9 +294,7 @@ final class GlassVisionRuntime: ObservableObject {
 
         if newActiveState {
             if trackingStateText == "Tracked", runtimeMode == .suspended {
-                runtimeMode = .playing
-                glassState = .idleOnPedestal
-                latestFeedbackMessage = "Tracking restored. Pick up the glass to continue."
+                resumePlayableInteraction(withMessage: "Tracking restored. Pick up the glass to continue.")
             }
         } else {
             suspendInteraction(reason: "Scene inactive")
@@ -250,6 +303,9 @@ final class GlassVisionRuntime: ObservableObject {
 
     func handleImmersiveDismissal() {
         suspendInteraction(reason: "Immersive space dismissed")
+        sceneSubscriptions.removeAll()
+        subscribedSceneID = nil
+        scene = nil
     }
 
     func reloadCurrentPuzzle() {
@@ -309,6 +365,20 @@ final class GlassVisionRuntime: ObservableObject {
         )
     }
 
+    private func ensureSceneSubscriptions(content: inout RealityViewContent) {
+        guard let currentScene = root.scene else {
+            return
+        }
+        let currentSceneID = ObjectIdentifier(currentScene)
+        guard subscribedSceneID != currentSceneID else {
+            return
+        }
+
+        sceneSubscriptions.removeAll()
+        installSubscriptions(content: &content)
+        subscribedSceneID = currentSceneID
+    }
+
     private func rebuild(for context: PuzzleLaunchContext?, using appModel: AppModel?) {
         clearHierarchy()
         currentSessionID = context?.id
@@ -319,7 +389,12 @@ final class GlassVisionRuntime: ObservableObject {
         currentGazeTargetID = nil
         currentEligibleTargetID = nil
         currentEligibility = nil
+        pendingArmedTargetID = nil
+        pendingArmedTargetStartDate = .distantPast
+        armedTargetID = nil
+        armedTargetDate = .distantPast
         interactionLocked = false
+        isGlassHeld = false
         lastAssignedSlotID = "-"
         lastTargetedEntityName = "None"
         trackingStateText = "Tracked"
@@ -361,6 +436,7 @@ final class GlassVisionRuntime: ObservableObject {
 
         runtimeMode = isSceneActive ? .playing : .suspended
         glassState = runtimeMode == .playing ? .hoverAvailable : .disabledTransition
+        glassHandleHitTarget.isEnabled = runtimeMode == .playing
         latestFeedbackMessage = "Pick up the glass and scan the room for hidden objects."
         updateAttachmentVisibility()
         updateDebugGeometryVisibility()
@@ -372,7 +448,8 @@ final class GlassVisionRuntime: ObservableObject {
 
         checklistAnchor = Entity()
         checklistAnchor.name = "checklist_anchor"
-        checklistAnchor.position = [0, 1.2, 0.12]
+        // Keep checklist comfortably off to the side so it doesn't block the pedestal.
+        checklistAnchor.position = [-0.62, 1.02, 0.18]
         pedestalRoot.addChild(checklistAnchor)
 
         debugAnchor = Entity()
@@ -427,7 +504,7 @@ final class GlassVisionRuntime: ObservableObject {
             root.transform = item.worldTransform.transform
             root.components.set(
                 CollisionComponent(
-                    shapes: [.generateSphere(radius: item.boundsProfile.radius)],
+                    shapes: [.generateSphere(radius: max(item.boundsProfile.radius * 1.35, 0.08))],
                     filter: CollisionFilter(group: GeneratedAssetFactory.hiddenTargetGroup, mask: .all)
                 )
             )
@@ -437,8 +514,12 @@ final class GlassVisionRuntime: ObservableObject {
             visual.name = "visual:\(item.itemID)"
             root.addChild(visual)
 
-            let highlight = GeneratedAssetFactory.makeSelectionHalo(radius: item.boundsProfile.radius, color: .clear)
+            let highlight = GeneratedAssetFactory.makeSelectionHalo(
+                radius: max(item.boundsProfile.radius * 8.0, 0.55),
+                color: .clear
+            )
             highlight.name = "highlight:\(item.itemID)"
+            highlight.position = [0, max(item.boundsProfile.radius * 2.2, 0.28), 0]
             highlight.isEnabled = false
             root.addChild(highlight)
 
@@ -484,7 +565,7 @@ final class GlassVisionRuntime: ObservableObject {
         }
 
         checklistAnchor.isEnabled = runtimeMode == .playing || runtimeMode == .suspended
-        debugAnchor.isEnabled = true
+        debugAnchor.isEnabled = runtimeMode == .playing || runtimeMode == .suspended
         completionAnchor.isEnabled = runtimeMode == .completed
     }
 
@@ -493,14 +574,7 @@ final class GlassVisionRuntime: ObservableObject {
 
         for (itemID, target) in targetEntities {
             target.debugBounds.isEnabled = debugOptions.showProjectedBounds && !foundItemIDs.contains(itemID)
-
-            if debugOptions.showEligibleTarget, itemID == currentEligibleTargetID {
-                setHighlight(target.highlight, color: .init(red: 1.0, green: 0.82, blue: 0.28, alpha: 0.28), enabled: true)
-            } else if debugOptions.showGazeTarget, itemID == currentGazeTargetID {
-                setHighlight(target.highlight, color: .init(red: 0.3, green: 0.74, blue: 1.0, alpha: 0.22), enabled: true)
-            } else {
-                setHighlight(target.highlight, color: .clear, enabled: false)
-            }
+            setHighlight(target.highlight, color: .clear, enabled: false)
         }
     }
 
@@ -519,8 +593,14 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private func updatePortalState() {
-        let shouldShowPortal = glassState == .portalActive && runtimeMode == .playing && isSceneActive
-        portalDisk.isEnabled = shouldShowPortal
+        guard runtimeMode == .playing, isSceneActive, glassRoot.parent != nil else {
+            portalDisk.isEnabled = false
+            return
+        }
+        if glassState != .portalActive {
+            glassState = .portalActive
+        }
+        portalDisk.isEnabled = true
     }
 
     private func updateCurrentTargets() {
@@ -545,42 +625,21 @@ final class GlassVisionRuntime: ObservableObject {
 
         let gazeCandidate = candidates
             .sorted {
-                if $0.overlapScore == $1.overlapScore {
-                    if $0.selectionPriority == $1.selectionPriority {
-                        if $0.depth == $1.depth {
-                            return $0.radialDistance < $1.radialDistance
-                        }
-                        return $0.depth < $1.depth
-                    }
-                    return $0.selectionPriority > $1.selectionPriority
-                }
-                return $0.overlapScore > $1.overlapScore
-            }
-            .first
-
-        currentGazeTargetID = gazeCandidate?.targetID
-
-        let eligibleCandidate = candidates
-            .filter {
-                $0.centerInsidePortal &&
-                $0.overlapScore >= (targetEntities[$0.targetID]?.definition.boundsProfile.minimumPortalOverlap ?? 0.5) &&
-                $0.passedOcclusion
-            }
-            .sorted {
-                let lhsIsGaze = $0.targetID == gazeCandidate?.targetID
-                let rhsIsGaze = $1.targetID == gazeCandidate?.targetID
-                if lhsIsGaze != rhsIsGaze {
-                    return lhsIsGaze
-                }
-                if $0.overlapScore == $1.overlapScore {
+                if $0.radialDistance == $1.radialDistance {
                     if $0.depth == $1.depth {
                         return $0.selectionPriority > $1.selectionPriority
                     }
                     return $0.depth < $1.depth
                 }
-                return $0.overlapScore > $1.overlapScore
+                return $0.radialDistance < $1.radialDistance
             }
             .first
+
+        currentGazeTargetID = gazeCandidate?.targetID
+        updateArmedTarget(using: gazeCandidate)
+
+        // Easy mode: treat gaze as eligible so pinch reliably collects what the player is looking at.
+        let eligibleCandidate = gazeCandidate
 
         currentEligibleTargetID = eligibleCandidate?.targetID
         currentEligibility = PortalEligibilitySnapshot(
@@ -614,10 +673,7 @@ final class GlassVisionRuntime: ObservableObject {
         let localPosition = portalReference.entity.convert(position: targetPosition, from: nil)
         let radialDistance = simd_length(SIMD2(localPosition.x, localPosition.y))
         let centerInside = radialDistance <= portalRadius
-        let depth = -localPosition.z
-        guard depth > portalDepthGate else {
-            return nil
-        }
+        let depth = max(abs(localPosition.z), 0.001)
 
         let projectedRadius = max(target.definition.boundsProfile.radius * 0.36 / max(depth, 0.25), 0.016)
         let overlap = normalizedOverlap(
@@ -679,6 +735,10 @@ final class GlassVisionRuntime: ObservableObject {
         }
 
         foundItemIDs.insert(id)
+        pendingArmedTargetID = nil
+        pendingArmedTargetStartDate = .distantPast
+        armedTargetID = nil
+        armedTargetDate = .distantPast
         lastAssignedSlotID = target.definition.pedestalSlotID
         latestFeedbackMessage = "Collected \(target.definition.displayName)."
         playAudioCue(.validSelection, entity: target.root)
@@ -709,7 +769,7 @@ final class GlassVisionRuntime: ObservableObject {
 
         let slotPosition = slotEntity.position(relativeTo: presentationRoot)
         let slotTransform = Transform(
-            scale: slotEntity.scale,
+            scale: slotEntity.scale * collectedDisplayScaleFactor,
             rotation: slotEntity.orientation(relativeTo: presentationRoot),
             translation: slotPosition + SIMD3<Float>(0, debugOptions.showPedestalSlotIDs ? 0.05 : 0.03, 0)
         )
@@ -756,8 +816,7 @@ final class GlassVisionRuntime: ObservableObject {
         case .tracked:
             trackingStateText = "Tracked"
             if runtimeMode == .suspended, isSceneActive {
-                runtimeMode = .playing
-                latestFeedbackMessage = "Tracking restored. Pick up the glass to continue."
+                resumePlayableInteraction(withMessage: "Tracking restored. Pick up the glass to continue.")
             }
         case .orientationTracked:
             trackingStateText = "Limited"
@@ -772,10 +831,11 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private func handleManipulationWillBegin(for entity: Entity) {
-        guard entity === glassRoot, runtimeMode == .playing, isSceneActive, !interactionLocked else {
+        guard isGlassManipulationEntity(entity), runtimeMode == .playing, isSceneActive, !interactionLocked else {
             return
         }
 
+        isGlassHeld = true
         glassState = .grabbed
         playAudioCue(.glassPickup, entity: glassRoot)
         glassState = .portalActive
@@ -784,22 +844,40 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private func handleManipulationWillRelease(for entity: Entity) {
-        guard entity === glassRoot else {
+        guard isGlassManipulationEntity(entity) else {
             return
         }
+        isGlassHeld = false
+
+        let currentPosition = glassRoot.position(relativeTo: pedestalRoot)
+        let distanceFromHome = simd_length(currentPosition - homeGlassTransform.translation)
+
+        if runtimeMode == .playing,
+           isSceneActive,
+           !interactionLocked,
+           distanceFromHome > glassAutoDockDistanceThreshold {
+            glassState = .portalActive
+            portalDisk.isEnabled = true
+            latestFeedbackMessage = "Portal active. Gaze a target in the lens, then pinch with your free hand."
+            return
+        }
+
         returnGlassToPedestal(animated: true)
     }
 
     private func handleManipulationWillEnd(for entity: Entity) {
-        guard entity === glassRoot else {
+        guard isGlassManipulationEntity(entity) else {
             return
         }
-        currentGazeTargetID = nil
-        currentEligibleTargetID = nil
     }
 
     private func returnGlassToPedestal(animated: Bool) {
         interactionLocked = true
+        isGlassHeld = false
+        pendingArmedTargetID = nil
+        pendingArmedTargetStartDate = .distantPast
+        armedTargetID = nil
+        armedTargetDate = .distantPast
         glassState = .releasedReturning
         portalDisk.isEnabled = false
         latestFeedbackMessage = "Portal closed."
@@ -826,9 +904,80 @@ final class GlassVisionRuntime: ObservableObject {
         if runtimeMode == .completed {
             return
         }
+        isGlassHeld = false
         runtimeMode = .suspended
         latestFeedbackMessage = reason
         returnGlassToPedestal(animated: false)
+    }
+
+    private func resumePlayableInteraction(withMessage message: String) {
+        runtimeMode = .playing
+        interactionLocked = false
+        isGlassHeld = false
+        pendingArmedTargetID = nil
+        pendingArmedTargetStartDate = .distantPast
+        armedTargetID = nil
+        armedTargetDate = .distantPast
+        glassState = .hoverAvailable
+        portalDisk.isEnabled = false
+        glassHandleHitTarget.isEnabled = true
+        currentGazeTargetID = nil
+        currentEligibleTargetID = nil
+        currentEligibility = nil
+        latestFeedbackMessage = message
+    }
+
+    private func shouldProcessPinchEvent() -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastPinchEventDate) > pinchDebounceInterval else {
+            return false
+        }
+        lastPinchEventDate = now
+        return true
+    }
+
+    private func isGlassManipulationEntity(_ entity: Entity) -> Bool {
+        var current: Entity? = entity
+        while let candidate = current {
+            if candidate === glassRoot || candidate === glassHandleHitTarget {
+                return true
+            }
+            current = candidate.parent
+        }
+        return false
+    }
+
+    private func bestPinchCandidateID() -> String? {
+        let preferredID = currentGazeTargetID ?? armedTargetID
+        guard let candidateID = preferredID, !foundItemIDs.contains(candidateID) else {
+            return nil
+        }
+        return candidateID
+    }
+
+    private func updateArmedTarget(using gazeCandidate: TargetEvaluation?) {
+        if let gazeCandidate {
+            armedTargetID = gazeCandidate.targetID
+            armedTargetDate = Date()
+            pendingArmedTargetID = gazeCandidate.targetID
+            pendingArmedTargetStartDate = armedTargetDate
+        } else {
+            armedTargetID = nil
+            pendingArmedTargetID = nil
+            pendingArmedTargetStartDate = .distantPast
+        }
+    }
+
+    private func logPinchState(reason: String, targetedEntity: Entity?, candidateID: String? = nil) {
+        let targetedName = targetedEntity?.name ?? "nil"
+        let overlapText = String(format: "%.3f", Double(currentEligibility?.overlapScore ?? 0.0))
+        let occlusionText = currentEligibility?.passedOcclusion == true ? "clear" : "blocked"
+        let age = Date().timeIntervalSince(armedTargetDate)
+        let armedAgeText = armedTargetID == nil ? "n/a" : String(format: "%.3fs", age)
+        let message = """
+        [GlassVision][Pinch] reason=\(reason) targeted=\(targetedName) candidate=\(candidateID ?? "nil") gaze=\(currentGazeTargetID ?? "nil") eligible=\(currentEligibleTargetID ?? "nil") armed=\(armedTargetID ?? "nil") armedAge=\(armedAgeText) overlap=\(overlapText) occlusion=\(occlusionText) portalVisible=\(isPortalVisible) runtime=\(String(describing: runtimeMode)) state=\(glassState.rawValue) feedback=\"\(latestFeedbackMessage)\"
+        """
+        print(message)
     }
 
     private func clearHierarchy() {
@@ -858,7 +1007,14 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private func isPortalEntity(_ entity: Entity) -> Bool {
-        entity === portalDisk || entity.parent === portalDisk
+        var current: Entity? = entity
+        while let candidate = current {
+            if candidate === portalDisk {
+                return true
+            }
+            current = candidate.parent
+        }
+        return false
     }
 
     private func setHighlight(_ entity: Entity, color: UIColor, enabled: Bool) {
