@@ -44,36 +44,35 @@ enum GeneratedAssetFactory {
         let root = Entity()
         root.name = "looking_glass"
 
+        let lensCenterY: Float = 0.11
+        let frameRadius = portalRadius + 0.028
+        let innerRimRadius = portalRadius + 0.006
+        let handleTopY = lensCenterY - innerRimRadius
+        let handleLength: Float = 0.2
+        let handleRadius: Float = 0.017
+        let handleCenterY = handleTopY - (handleLength / 2)
+
         var manipulation = ManipulationComponent()
         manipulation.releaseBehavior = .stay
         manipulation.audioConfiguration = .none
         root.components.set(manipulation)
-        root.components.set(InputTargetComponent())
-        root.components.set(
-            CollisionComponent(
-                shapes: [
-                    .generateCapsule(height: 0.40, radius: portalRadius + 0.05)
-                ],
-                filter: CollisionFilter(group: portalInteractionGroup, mask: .all)
-            )
-        )
 
         let frame = ModelEntity(
-            mesh: .generateCylinder(height: 0.012, radius: portalRadius + 0.028),
+            mesh: .generateCylinder(height: 0.012, radius: frameRadius),
             materials: [simpleMaterial(.init(red: 0.64, green: 0.49, blue: 0.22, alpha: 1.0), metallic: true)]
         )
         frame.name = "glass_frame"
         frame.transform.rotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-        frame.position = [0, 0.11, 0]
+        frame.position = [0, lensCenterY, 0]
         root.addChild(frame)
 
         let innerBezel = ModelEntity(
-            mesh: .generateCylinder(height: 0.006, radius: portalRadius + 0.006),
+            mesh: .generateCylinder(height: 0.006, radius: innerRimRadius),
             materials: [simpleMaterial(.init(red: 0.84, green: 0.73, blue: 0.44, alpha: 1.0), metallic: true)]
         )
         innerBezel.name = "glass_inner_bezel"
         innerBezel.transform.rotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-        innerBezel.position = [0, 0.11, 0.004]
+        innerBezel.position = [0, lensCenterY, 0.004]
         root.addChild(innerBezel)
 
         let portalDisk = ModelEntity(
@@ -82,7 +81,7 @@ enum GeneratedAssetFactory {
         )
         portalDisk.name = "portal_disk"
         portalDisk.transform.rotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-        portalDisk.position = [0, 0.11, 0.009]
+        portalDisk.position = [0, lensCenterY, 0.009]
         portalDisk.components.set(InputTargetComponent())
         portalDisk.components.set(
             CollisionComponent(
@@ -98,32 +97,32 @@ enum GeneratedAssetFactory {
         )
         debugRing.name = "portal_debug_ring"
         debugRing.transform.rotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-        debugRing.position = [0, 0.11, 0.012]
+        debugRing.position = [0, lensCenterY, 0.012]
         debugRing.isEnabled = false
         root.addChild(debugRing)
 
         let handle = ModelEntity(
-            mesh: .generateCylinder(height: 0.24, radius: 0.018),
+            mesh: .generateCylinder(height: handleLength, radius: handleRadius),
             materials: [simpleMaterial(.init(red: 0.31, green: 0.17, blue: 0.08, alpha: 1.0), metallic: false)]
         )
         handle.name = "glass_handle_visual"
-        handle.position = [0, -0.02, 0]
+        handle.position = [0, handleCenterY, 0]
         root.addChild(handle)
 
         let handleCap = ModelEntity(
-            mesh: .generateSphere(radius: 0.024),
+            mesh: .generateSphere(radius: 0.022),
             materials: [simpleMaterial(.init(red: 0.66, green: 0.51, blue: 0.2, alpha: 1.0), metallic: true)]
         )
         handleCap.name = "glass_handle_cap"
-        handleCap.position = [0, -0.15, 0]
+        handleCap.position = [0, handleCenterY - (handleLength / 2) - 0.014, 0]
         root.addChild(handleCap)
 
         let handleHitTarget = Entity()
         handleHitTarget.name = "glass_handle_hit_target"
-        handleHitTarget.position = [0, -0.02, 0]
+        handleHitTarget.position = [0, handleCenterY - 0.02, 0]
         handleHitTarget.components.set(
             CollisionComponent(
-                shapes: [.generateCapsule(height: 0.28, radius: 0.05)],
+                shapes: [.generateCapsule(height: 0.18, radius: 0.038)],
                 filter: CollisionFilter(group: portalInteractionGroup, mask: .all)
             )
         )
