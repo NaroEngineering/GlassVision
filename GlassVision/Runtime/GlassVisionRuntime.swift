@@ -315,7 +315,7 @@ final class GlassVisionRuntime: ObservableObject {
         isSceneActive = newActiveState
 
         if newActiveState {
-            if trackingStateText == "Tracked", runtimeMode == .suspended {
+            if runtimeMode == .suspended, trackingStateText != "Untracked" {
                 resumePlayableInteraction(withMessage: "Tracking restored. Pick up the glass to continue.")
             }
         } else {
@@ -559,11 +559,11 @@ final class GlassVisionRuntime: ObservableObject {
                 )
             )
             root.components.set(InputTargetComponent())
-            root.components.set(HoverEffectComponent())
+            applyHoverEffectRecursively(to: root)
 
             let visual = GeneratedAssetFactory.makeTargetVisual(for: item.assetID)
             visual.name = "visual:\(item.itemID)"
-            visual.components.set(HoverEffectComponent())
+            applyHoverEffectRecursively(to: visual)
             normalizeVisualScale(visual, boundsRadius: item.boundsProfile.radius)
             root.addChild(visual)
 
@@ -642,6 +642,7 @@ final class GlassVisionRuntime: ObservableObject {
         }
 
         updatePortalState()
+        updateGlassInteractivityState()
         updateCurrentTargets()
         updateTargetHighlighting()
         updateDebugGeometryVisibility()
@@ -903,7 +904,6 @@ final class GlassVisionRuntime: ObservableObject {
         runtimeMode = .completed
         glassState = .idleOnPedestal
         setPortalEnabled(false)
-        glassHandleHitTarget.isEnabled = false
         interactionLocked = true
         latestFeedbackMessage = "Puzzle complete."
         playAudioCue(.completion, entity: completionAnchor)
@@ -934,7 +934,10 @@ final class GlassVisionRuntime: ObservableObject {
             }
         case .orientationTracked:
             trackingStateText = "Limited"
-            suspendInteraction(reason: "Tracking limited")
+            // Limited orientation tracking is still usable; do not force a suspend.
+            if runtimeMode == .playing {
+                latestFeedbackMessage = "Tracking limited. Continue scanning with slower movement."
+            }
         case .untracked:
             trackingStateText = "Untracked"
             suspendInteraction(reason: "Tracking lost")
@@ -995,7 +998,6 @@ final class GlassVisionRuntime: ObservableObject {
         glassState = .releasedReturning
         setPortalEnabled(false)
         latestFeedbackMessage = "Portal closed."
-        glassHandleHitTarget.isEnabled = false
         currentGazeTargetID = nil
         currentEligibleTargetID = nil
 
@@ -1009,7 +1011,6 @@ final class GlassVisionRuntime: ObservableObject {
             try? await Task.sleep(for: .milliseconds(animated ? 380 : 20))
             guard let self else { return }
             self.glassState = self.runtimeMode == .playing ? .hoverAvailable : .idleOnPedestal
-            self.glassHandleHitTarget.isEnabled = self.runtimeMode == .playing
             self.interactionLocked = false
         }
     }
@@ -1034,11 +1035,15 @@ final class GlassVisionRuntime: ObservableObject {
         armedTargetDate = .distantPast
         glassState = .hoverAvailable
         setPortalEnabled(false)
-        glassHandleHitTarget.isEnabled = true
         currentGazeTargetID = nil
         currentEligibleTargetID = nil
         currentEligibility = nil
         latestFeedbackMessage = message
+    }
+
+    private func updateGlassInteractivityState() {
+        let canInteractWithGlass = runtimeMode == .playing && isSceneActive && !interactionLocked
+        glassHandleHitTarget.isEnabled = canInteractWithGlass
     }
 
     private func shouldProcessPinchEvent() -> Bool {
@@ -1179,6 +1184,13 @@ final class GlassVisionRuntime: ObservableObject {
         let targetDiameter = max(boundsRadius * 2.6, 0.16)
         let scaleFactor = min(max(targetDiameter / longestSide, 0.7), 4.8)
         visual.scale *= SIMD3<Float>(repeating: scaleFactor)
+    }
+
+    private func applyHoverEffectRecursively(to entity: Entity) {
+        entity.components.set(HoverEffectComponent())
+        for child in entity.children {
+            applyHoverEffectRecursively(to: child)
+        }
     }
 
     private func logPinchState(reason: String, targetedEntity: Entity?, candidateID: String? = nil) {

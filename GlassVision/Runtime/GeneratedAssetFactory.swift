@@ -69,6 +69,13 @@ enum GeneratedAssetFactory {
         manipulation.releaseBehavior = .stay
         manipulation.audioConfiguration = .none
         root.components.set(manipulation)
+        root.components.set(InputTargetComponent())
+        root.components.set(
+            CollisionComponent(
+                shapes: [.generateCapsule(height: 0.33, radius: frameRadius * 1.1)],
+                filter: CollisionFilter(group: portalInteractionGroup, mask: .all)
+            )
+        )
 
         let frame = ModelEntity(
             mesh: .generateCylinder(height: 0.012, radius: frameRadius),
