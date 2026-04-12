@@ -14,7 +14,19 @@ enum GeneratedAssetFactory {
     static let hiddenTargetGroup = CollisionGroup(rawValue: 1 << 2)
     static let hiddenOccluderGroup = CollisionGroup(rawValue: 1 << 3)
     static let portalInteractionGroup = CollisionGroup(rawValue: 1 << 4)
-    private static let bundledObjectScale: Float = 1.0 / 5.0
+    private static let bundledObjectScale: Float = 1.0 / 3.2
+    private static let bundledObjectScaleMultiplierByAssetID: [String: Float] = [
+        "feather_quill": 2.1,
+        "hourglass": 2.2,
+        "crystal_ball": 2.0,
+        "potion_bottle": 2.1,
+        "spell_book": 2.0,
+        "key": 5.0,
+        "candle": 5.0,
+        "wand": 5.0,
+        "moon_charm": 2.3,
+        "tiny_dragon_figurine": 2.3
+    ]
     private static var loadedObjectTemplates: [String: Entity] = [:]
     private static var missingObjectNames: Set<String> = []
 
@@ -35,7 +47,8 @@ enum GeneratedAssetFactory {
     struct LookingGlassAssembly {
         let root: Entity
         let handleHitTarget: Entity
-        let portalDisk: ModelEntity
+        let portalDiskFront: ModelEntity
+        let portalDiskBack: ModelEntity
         let debugRing: ModelEntity
         let homeTransform: Transform
     }
@@ -75,21 +88,37 @@ enum GeneratedAssetFactory {
         innerBezel.position = [0, lensCenterY, 0.004]
         root.addChild(innerBezel)
 
-        let portalDisk = ModelEntity(
+        let portalDiskFront = ModelEntity(
             mesh: .generateCylinder(height: 0.002, radius: portalRadius),
             materials: [PortalMaterial()]
         )
-        portalDisk.name = "portal_disk"
-        portalDisk.transform.rotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-        portalDisk.position = [0, lensCenterY, 0.009]
-        portalDisk.components.set(InputTargetComponent())
-        portalDisk.components.set(
+        portalDiskFront.name = "portal_disk_front"
+        portalDiskFront.transform.rotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+        portalDiskFront.position = [0, lensCenterY, 0.009]
+        portalDiskFront.components.set(InputTargetComponent())
+        portalDiskFront.components.set(
             CollisionComponent(
                 shapes: [.generateBox(width: portalRadius * 2, height: 0.003, depth: portalRadius * 2)],
                 filter: CollisionFilter(group: portalInteractionGroup, mask: .all)
             )
         )
-        root.addChild(portalDisk)
+        root.addChild(portalDiskFront)
+
+        let portalDiskBack = ModelEntity(
+            mesh: .generateCylinder(height: 0.002, radius: portalRadius),
+            materials: [PortalMaterial()]
+        )
+        portalDiskBack.name = "portal_disk_back"
+        portalDiskBack.transform.rotation = simd_quatf(angle: -.pi / 2, axis: [1, 0, 0])
+        portalDiskBack.position = [0, lensCenterY, -0.009]
+        portalDiskBack.components.set(InputTargetComponent())
+        portalDiskBack.components.set(
+            CollisionComponent(
+                shapes: [.generateBox(width: portalRadius * 2, height: 0.003, depth: portalRadius * 2)],
+                filter: CollisionFilter(group: portalInteractionGroup, mask: .all)
+            )
+        )
+        root.addChild(portalDiskBack)
 
         let debugRing = ModelEntity(
             mesh: .generateCylinder(height: 0.003, radius: portalRadius + 0.01),
@@ -142,7 +171,8 @@ enum GeneratedAssetFactory {
         return LookingGlassAssembly(
             root: root,
             handleHitTarget: handleHitTarget,
-            portalDisk: portalDisk,
+            portalDiskFront: portalDiskFront,
+            portalDiskBack: portalDiskBack,
             debugRing: debugRing,
             homeTransform: homeTransform
         )
@@ -258,6 +288,29 @@ enum GeneratedAssetFactory {
             materials: [unlitMaterial(color)]
         )
         return halo
+    }
+
+    static func makeSelectionBracket(radius: Float) -> Entity {
+        let root = Entity()
+        let bracketRadius = max(radius * 1.22, 0.06)
+        let segmentLength = max(radius * 0.55, 0.04)
+        let thickness = max(radius * 0.08, 0.004)
+        let depth = thickness
+
+        func makeSegment(size: SIMD3<Float>, position: SIMD3<Float>) -> ModelEntity {
+            let segment = ModelEntity(
+                mesh: .generateBox(size: size, cornerRadius: thickness * 0.5),
+                materials: [unlitMaterial(.init(red: 0.98, green: 0.82, blue: 0.28, alpha: 0.9))]
+            )
+            segment.position = position
+            return segment
+        }
+
+        root.addChild(makeSegment(size: [segmentLength, thickness, depth], position: [0, bracketRadius, 0]))
+        root.addChild(makeSegment(size: [segmentLength, thickness, depth], position: [0, -bracketRadius, 0]))
+        root.addChild(makeSegment(size: [thickness, segmentLength, depth], position: [bracketRadius, 0, 0]))
+        root.addChild(makeSegment(size: [thickness, segmentLength, depth], position: [-bracketRadius, 0, 0]))
+        return root
     }
 
     static func makeDebugBounds(radius: Float) -> Entity {
@@ -651,7 +704,8 @@ enum GeneratedAssetFactory {
             if let cachedTemplate = loadedObjectTemplates[resourceName] {
                 let clone = cachedTemplate.clone(recursive: true)
                 clone.name = "asset:\(assetID)"
-                clone.scale *= SIMD3<Float>(repeating: bundledObjectScale)
+                let scale = bundledObjectScale * (bundledObjectScaleMultiplierByAssetID[assetID] ?? 1.0)
+                clone.scale *= SIMD3<Float>(repeating: scale)
                 return clone
             }
 
@@ -666,7 +720,8 @@ enum GeneratedAssetFactory {
                     loadedObjectTemplates[resourceName] = loaded
                     let clone = loaded.clone(recursive: true)
                     clone.name = "asset:\(assetID)"
-                    clone.scale *= SIMD3<Float>(repeating: bundledObjectScale)
+                    let scale = bundledObjectScale * (bundledObjectScaleMultiplierByAssetID[assetID] ?? 1.0)
+                    clone.scale *= SIMD3<Float>(repeating: scale)
                     return clone
                 }
             }

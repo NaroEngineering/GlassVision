@@ -57,16 +57,27 @@ final class GlassVisionRuntime: ObservableObject {
         let visual: Entity
         let highlight: Entity
         let debugBounds: Entity
+        let baseScale: SIMD3<Float>
     }
 
     private struct TargetEvaluation {
         let targetID: String
+        let portalSideName: String
         let overlapScore: Float
         let centerInsidePortal: Bool
         let passedOcclusion: Bool
+        let minimumPortalOverlap: Float
         let depth: Float
         let radialDistance: Float
         let selectionPriority: Int
+
+        var requiredOverlap: Float {
+            max(minimumPortalOverlap - 0.15, 0.3)
+        }
+
+        var isPortalEligible: Bool {
+            centerInsidePortal && overlapScore >= requiredOverlap
+        }
     }
 
     private var sceneSubscriptions: [EventSubscription] = []
@@ -84,12 +95,16 @@ final class GlassVisionRuntime: ObservableObject {
     private var glassRoot = Entity()
     private var glassHandleHitTarget = Entity()
     private var portalDisk = ModelEntity()
+    private var portalDiskBack = ModelEntity()
     private var portalDebugRing = ModelEntity()
     private var attachmentConfigured = false
     private var didAddRoot = false
     private var currentSessionID: UUID?
     private var currentContext: PuzzleLaunchContext?
     private weak var appModel: AppModel?
+    private var deferredRebuildContext: PuzzleLaunchContext?
+    private weak var deferredRebuildAppModel: AppModel?
+    private var deferredRebuildScheduled = false
     private var targetEntities: [String: TargetRuntime] = [:]
     private var collectionSlotEntities: [String: Entity] = [:]
     private var scene: RealityKit.Scene?
@@ -109,6 +124,13 @@ final class GlassVisionRuntime: ObservableObject {
     private var pendingArmedTargetStartDate: Date = .distantPast
     private var armedTargetID: String?
     private var armedTargetDate: Date = .distantPast
+    private var lastSelectionLogDate: Date = .distantPast
+    private var lastSelectionLogToken = ""
+    private var lastPortalSideLog = ""
+    private let armedTargetGracePeriod: TimeInterval = 0.8
+    private let portalSideStickDuration: TimeInterval = 0.25
+    private var stickyPortalSideName: String?
+    private var stickyPortalSideDate: Date = .distantPast
 
     @Published var runtimeMode: RuntimeMode = .unconfigured
     @Published var glassState: LookingGlassState = .idleOnPedestal
@@ -213,7 +235,7 @@ final class GlassVisionRuntime: ObservableObject {
         configureAttachments(attachments)
 
         if currentSessionID != appModel.activeLaunchContext?.id {
-            rebuild(for: appModel.activeLaunchContext, using: appModel)
+            scheduleDeferredRebuild(for: appModel.activeLaunchContext, using: appModel)
         }
 
         updateAttachmentVisibility()
@@ -263,21 +285,21 @@ final class GlassVisionRuntime: ObservableObject {
                 return
             }
 
-            guard let candidateID = bestPinchCandidateID(), candidateID == targetedID else {
-                logPinchState(reason: "rejected: target-mismatch-with-armed", targetedEntity: targetedEntity)
-                latestFeedbackMessage = "Pinch the highlighted target in the lens."
+            guard let candidateID = bestPinchCandidateID() else {
+                logPinchState(reason: "rejected: no-eligible-candidate", targetedEntity: targetedEntity)
+                latestFeedbackMessage = "Center a visible target in the lens, then pinch."
                 playAudioCue(.invalidSelection)
                 return
             }
 
-            logPinchState(reason: "collect-from-target-tap", targetedEntity: targetedEntity, candidateID: targetedID)
-            collectTarget(id: targetedID, animated: true)
+            let resolvedID = candidateID == targetedID ? targetedID : candidateID
+            let reason = candidateID == targetedID ? "collect-from-target-tap" : "collect-from-target-fallback"
+            logPinchState(reason: reason, targetedEntity: targetedEntity, candidateID: resolvedID)
+            collectTarget(id: resolvedID, animated: true)
             return
         }
 
-        if let targetedEntity,
-           isPortalEntity(targetedEntity),
-           let candidateID = bestPinchCandidateID() {
+        if let targetedEntity, isPortalEntity(targetedEntity), let candidateID = bestPinchCandidateID() {
             lastTargetedEntityName = targetedEntity.name
             logPinchState(reason: "collect-from-portal-tap", targetedEntity: targetedEntity, candidateID: candidateID)
             collectTarget(id: candidateID, animated: true)
@@ -377,6 +399,32 @@ final class GlassVisionRuntime: ObservableObject {
         sceneSubscriptions.removeAll()
         installSubscriptions(content: &content)
         subscribedSceneID = currentSceneID
+    }
+
+    private func scheduleDeferredRebuild(for context: PuzzleLaunchContext?, using appModel: AppModel) {
+        deferredRebuildContext = context
+        deferredRebuildAppModel = appModel
+
+        guard !deferredRebuildScheduled else {
+            return
+        }
+        deferredRebuildScheduled = true
+
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+
+            // Publish-heavy runtime resets must happen outside RealityView.update callbacks.
+            await Task.yield()
+
+            self.deferredRebuildScheduled = false
+            let queuedContext = self.deferredRebuildContext
+            self.deferredRebuildContext = nil
+            let queuedAppModel = self.deferredRebuildAppModel
+            self.deferredRebuildAppModel = nil
+            self.rebuild(for: queuedContext, using: queuedAppModel)
+        }
     }
 
     private func rebuild(for context: PuzzleLaunchContext?, using appModel: AppModel?) {
@@ -482,11 +530,13 @@ final class GlassVisionRuntime: ObservableObject {
         let assembly = GeneratedAssetFactory.makeLookingGlass(portalRadius: portalRadius)
         glassRoot = assembly.root
         glassHandleHitTarget = assembly.handleHitTarget
-        portalDisk = assembly.portalDisk
+        portalDisk = assembly.portalDiskFront
+        portalDiskBack = assembly.portalDiskBack
         portalDebugRing = assembly.debugRing
         homeGlassTransform = assembly.homeTransform
         portalDisk.components.set(PortalComponent(target: portalWorld))
-        portalDisk.isEnabled = false
+        portalDiskBack.components.set(PortalComponent(target: portalWorld))
+        setPortalEnabled(false)
         glassRoot.transform = homeGlassTransform
         pedestalRoot.addChild(glassRoot)
     }
@@ -509,17 +559,16 @@ final class GlassVisionRuntime: ObservableObject {
                 )
             )
             root.components.set(InputTargetComponent())
+            root.components.set(HoverEffectComponent())
 
             let visual = GeneratedAssetFactory.makeTargetVisual(for: item.assetID)
             visual.name = "visual:\(item.itemID)"
+            visual.components.set(HoverEffectComponent())
+            normalizeVisualScale(visual, boundsRadius: item.boundsProfile.radius)
             root.addChild(visual)
 
-            let highlight = GeneratedAssetFactory.makeSelectionHalo(
-                radius: max(item.boundsProfile.radius * 8.0, 0.55),
-                color: .clear
-            )
+            let highlight = GeneratedAssetFactory.makeSelectionBracket(radius: item.boundsProfile.radius)
             highlight.name = "highlight:\(item.itemID)"
-            highlight.position = [0, max(item.boundsProfile.radius * 2.2, 0.28), 0]
             highlight.isEnabled = false
             root.addChild(highlight)
 
@@ -534,7 +583,8 @@ final class GlassVisionRuntime: ObservableObject {
                 root: root,
                 visual: visual,
                 highlight: highlight,
-                debugBounds: debugBounds
+                debugBounds: debugBounds,
+                baseScale: root.scale
             )
         }
     }
@@ -574,8 +624,12 @@ final class GlassVisionRuntime: ObservableObject {
 
         for (itemID, target) in targetEntities {
             target.debugBounds.isEnabled = debugOptions.showProjectedBounds && !foundItemIDs.contains(itemID)
-            setHighlight(target.highlight, color: .clear, enabled: false)
         }
+    }
+
+    private func setPortalEnabled(_ enabled: Bool) {
+        portalDisk.isEnabled = enabled
+        portalDiskBack.isEnabled = enabled
     }
 
     private func tick(deltaTime: TimeInterval) {
@@ -589,22 +643,23 @@ final class GlassVisionRuntime: ObservableObject {
 
         updatePortalState()
         updateCurrentTargets()
+        updateTargetHighlighting()
         updateDebugGeometryVisibility()
     }
 
     private func updatePortalState() {
         guard runtimeMode == .playing, isSceneActive, glassRoot.parent != nil else {
-            portalDisk.isEnabled = false
+            setPortalEnabled(false)
             return
         }
         if glassState != .portalActive {
             glassState = .portalActive
         }
-        portalDisk.isEnabled = true
+        setPortalEnabled(true)
     }
 
     private func updateCurrentTargets() {
-        guard runtimeMode == .playing, isPortalVisible, let portalReference = currentPortalReference() else {
+        guard runtimeMode == .playing, isPortalVisible, let portalReferences = currentPortalReferences() else {
             currentGazeTargetID = nil
             currentEligibleTargetID = nil
             currentEligibility = PortalEligibilitySnapshot(
@@ -619,12 +674,18 @@ final class GlassVisionRuntime: ObservableObject {
             return
         }
 
-        let candidates = targetEntities.values.compactMap { target in
-            evaluateTarget(id: target.definition.itemID, portalReference: portalReference)
+        let candidates = targetEntities.values.flatMap { target in
+            portalReferences.compactMap { portalReference in
+                evaluateTarget(id: target.definition.itemID, portalReference: portalReference)
+            }
         }
 
         let gazeCandidate = candidates
+            .filter(\.centerInsidePortal)
             .sorted {
+                if $0.passedOcclusion != $1.passedOcclusion {
+                    return $0.passedOcclusion && !$1.passedOcclusion
+                }
                 if $0.radialDistance == $1.radialDistance {
                     if $0.depth == $1.depth {
                         return $0.selectionPriority > $1.selectionPriority
@@ -636,29 +697,74 @@ final class GlassVisionRuntime: ObservableObject {
             .first
 
         currentGazeTargetID = gazeCandidate?.targetID
-        updateArmedTarget(using: gazeCandidate)
 
-        // Easy mode: treat gaze as eligible so pinch reliably collects what the player is looking at.
-        let eligibleCandidate = gazeCandidate
+        let eligibleCandidate = candidates
+            .filter(\.isPortalEligible)
+            .sorted {
+                if $0.passedOcclusion != $1.passedOcclusion {
+                    return $0.passedOcclusion && !$1.passedOcclusion
+                }
+                if $0.overlapScore == $1.overlapScore {
+                    if $0.radialDistance == $1.radialDistance {
+                        if $0.depth == $1.depth {
+                            return $0.selectionPriority > $1.selectionPriority
+                        }
+                        return $0.depth < $1.depth
+                    }
+                    return $0.radialDistance < $1.radialDistance
+                }
+                return $0.overlapScore > $1.overlapScore
+            }
+            .first
 
-        currentEligibleTargetID = eligibleCandidate?.targetID
+        let resolvedCandidate = resolveStableCandidate(
+            candidates: candidates,
+            eligibleCandidate: eligibleCandidate,
+            gazeCandidate: gazeCandidate
+        )
+        updateArmedTarget(using: resolvedCandidate)
+
+        currentEligibleTargetID = resolvedCandidate?.targetID
         currentEligibility = PortalEligibilitySnapshot(
-            targetID: eligibleCandidate?.targetID,
-            targetName: targetEntities[eligibleCandidate?.targetID ?? ""]?.definition.displayName,
-            overlapScore: eligibleCandidate?.overlapScore ?? 0,
-            centerInsidePortal: eligibleCandidate?.centerInsidePortal ?? false,
-            passedOcclusion: eligibleCandidate?.passedOcclusion ?? false,
-            isAlreadyFound: eligibleCandidate.map { foundItemIDs.contains($0.targetID) } ?? false,
+            targetID: resolvedCandidate?.targetID,
+            targetName: targetEntities[resolvedCandidate?.targetID ?? ""]?.definition.displayName,
+            overlapScore: resolvedCandidate?.overlapScore ?? 0,
+            centerInsidePortal: resolvedCandidate?.centerInsidePortal ?? false,
+            passedOcclusion: resolvedCandidate?.passedOcclusion ?? false,
+            isAlreadyFound: resolvedCandidate.map { foundItemIDs.contains($0.targetID) } ?? false,
             portalActive: portalDisk.isEnabled
+        )
+        logPortalSide(using: resolvedCandidate)
+
+        logSelectionSnapshot(
+            gazeCandidate: gazeCandidate,
+            eligibleCandidate: eligibleCandidate,
+            resolvedCandidate: resolvedCandidate,
+            candidateCount: candidates.count
         )
     }
 
-    private func currentPortalReference() -> (entity: ModelEntity, sampleOrigin: SIMD3<Float>)? {
+    private func currentPortalReferences() -> [(entity: ModelEntity, sampleOrigin: SIMD3<Float>)]? {
         guard portalDisk.parent != nil else {
             return nil
         }
-        let sampleOrigin = portalDisk.position(relativeTo: nil)
-        return (portalDisk, sampleOrigin)
+
+        var references: [(entity: ModelEntity, sampleOrigin: SIMD3<Float>)] = [
+            (portalDisk, portalDisk.position(relativeTo: nil))
+        ]
+        if portalDiskBack.parent != nil {
+            references.append((portalDiskBack, portalDiskBack.position(relativeTo: nil)))
+        }
+        return references
+    }
+
+    private func logPortalSide(using candidate: TargetEvaluation?) {
+        let selectedSide = candidate?.portalSideName ?? "none"
+        guard selectedSide != lastPortalSideLog else {
+            return
+        }
+        lastPortalSideLog = selectedSide
+        print("[GlassVision][PortalSide] selected=\(selectedSide)")
     }
 
     private func evaluateTarget(
@@ -671,9 +777,15 @@ final class GlassVisionRuntime: ObservableObject {
 
         let targetPosition = target.root.position(relativeTo: nil)
         let localPosition = portalReference.entity.convert(position: targetPosition, from: nil)
-        let radialDistance = simd_length(SIMD2(localPosition.x, localPosition.y))
-        let centerInside = radialDistance <= portalRadius
-        let depth = max(abs(localPosition.z), 0.001)
+        let planeProjections: [(radial: Float, depth: Float)] = [
+            (simd_length(SIMD2(localPosition.x, localPosition.y)), abs(localPosition.z)),
+            (simd_length(SIMD2(localPosition.x, localPosition.z)), abs(localPosition.y)),
+            (simd_length(SIMD2(localPosition.y, localPosition.z)), abs(localPosition.x))
+        ]
+        let bestProjection = planeProjections.min { $0.radial < $1.radial } ?? (0, 0.001)
+        let radialDistance = bestProjection.radial
+        let centerInside = radialDistance <= (portalRadius * 1.2)
+        let depth = max(bestProjection.depth, 0.001)
 
         let projectedRadius = max(target.definition.boundsProfile.radius * 0.36 / max(depth, 0.25), 0.016)
         let overlap = normalizedOverlap(
@@ -690,9 +802,11 @@ final class GlassVisionRuntime: ObservableObject {
 
         return TargetEvaluation(
             targetID: target.definition.itemID,
+            portalSideName: portalReference.entity.name,
             overlapScore: overlap,
             centerInsidePortal: centerInside,
             passedOcclusion: occlusionClear,
+            minimumPortalOverlap: target.definition.boundsProfile.minimumPortalOverlap,
             depth: depth,
             radialDistance: radialDistance,
             selectionPriority: target.definition.selectionPriority
@@ -788,7 +902,7 @@ final class GlassVisionRuntime: ObservableObject {
 
         runtimeMode = .completed
         glassState = .idleOnPedestal
-        portalDisk.isEnabled = false
+        setPortalEnabled(false)
         glassHandleHitTarget.isEnabled = false
         interactionLocked = true
         latestFeedbackMessage = "Puzzle complete."
@@ -857,7 +971,7 @@ final class GlassVisionRuntime: ObservableObject {
            !interactionLocked,
            distanceFromHome > glassAutoDockDistanceThreshold {
             glassState = .portalActive
-            portalDisk.isEnabled = true
+            setPortalEnabled(true)
             latestFeedbackMessage = "Portal active. Gaze a target in the lens, then pinch with your free hand."
             return
         }
@@ -879,7 +993,7 @@ final class GlassVisionRuntime: ObservableObject {
         armedTargetID = nil
         armedTargetDate = .distantPast
         glassState = .releasedReturning
-        portalDisk.isEnabled = false
+        setPortalEnabled(false)
         latestFeedbackMessage = "Portal closed."
         glassHandleHitTarget.isEnabled = false
         currentGazeTargetID = nil
@@ -919,7 +1033,7 @@ final class GlassVisionRuntime: ObservableObject {
         armedTargetID = nil
         armedTargetDate = .distantPast
         glassState = .hoverAvailable
-        portalDisk.isEnabled = false
+        setPortalEnabled(false)
         glassHandleHitTarget.isEnabled = true
         currentGazeTargetID = nil
         currentEligibleTargetID = nil
@@ -948,9 +1062,12 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private func bestPinchCandidateID() -> String? {
-        let preferredID = currentGazeTargetID ?? armedTargetID
-        guard let candidateID = preferredID, !foundItemIDs.contains(candidateID) else {
-            return nil
+        guard let candidateID = currentEligibleTargetID, !foundItemIDs.contains(candidateID) else {
+            guard let armedTargetID, !foundItemIDs.contains(armedTargetID) else {
+                return nil
+            }
+            let age = Date().timeIntervalSince(armedTargetDate)
+            return age <= armedTargetGracePeriod ? armedTargetID : nil
         }
         return candidateID
     }
@@ -961,11 +1078,107 @@ final class GlassVisionRuntime: ObservableObject {
             armedTargetDate = Date()
             pendingArmedTargetID = gazeCandidate.targetID
             pendingArmedTargetStartDate = armedTargetDate
-        } else {
+        } else if Date().timeIntervalSince(armedTargetDate) > armedTargetGracePeriod {
             armedTargetID = nil
             pendingArmedTargetID = nil
             pendingArmedTargetStartDate = .distantPast
         }
+    }
+
+    private func resolveStableCandidate(
+        candidates: [TargetEvaluation],
+        eligibleCandidate: TargetEvaluation?,
+        gazeCandidate: TargetEvaluation?
+    ) -> TargetEvaluation? {
+        let now = Date()
+        if let stickyPortalSideName,
+           now.timeIntervalSince(stickyPortalSideDate) <= portalSideStickDuration {
+            let stickyEligible = candidates
+                .filter { $0.portalSideName == stickyPortalSideName && $0.isPortalEligible }
+                .sorted(by: compareEligibleCandidates)
+                .first
+            if let stickyEligible {
+                stickyPortalSideDate = now
+                return stickyEligible
+            }
+
+            let stickyGaze = candidates
+                .filter { $0.portalSideName == stickyPortalSideName && $0.centerInsidePortal }
+                .sorted(by: compareGazeCandidates)
+                .first
+            if let stickyGaze {
+                stickyPortalSideDate = now
+                return stickyGaze
+            }
+        }
+
+        let resolved = eligibleCandidate ?? gazeCandidate
+        stickyPortalSideName = resolved?.portalSideName
+        stickyPortalSideDate = now
+        return resolved
+    }
+
+    private func compareGazeCandidates(_ lhs: TargetEvaluation, _ rhs: TargetEvaluation) -> Bool {
+        if lhs.passedOcclusion != rhs.passedOcclusion {
+            return lhs.passedOcclusion && !rhs.passedOcclusion
+        }
+        if lhs.radialDistance == rhs.radialDistance {
+            if lhs.depth == rhs.depth {
+                return lhs.selectionPriority > rhs.selectionPriority
+            }
+            return lhs.depth < rhs.depth
+        }
+        return lhs.radialDistance < rhs.radialDistance
+    }
+
+    private func compareEligibleCandidates(_ lhs: TargetEvaluation, _ rhs: TargetEvaluation) -> Bool {
+        if lhs.passedOcclusion != rhs.passedOcclusion {
+            return lhs.passedOcclusion && !rhs.passedOcclusion
+        }
+        if lhs.overlapScore == rhs.overlapScore {
+            if lhs.radialDistance == rhs.radialDistance {
+                if lhs.depth == rhs.depth {
+                    return lhs.selectionPriority > rhs.selectionPriority
+                }
+                return lhs.depth < rhs.depth
+            }
+            return lhs.radialDistance < rhs.radialDistance
+        }
+        return lhs.overlapScore > rhs.overlapScore
+    }
+
+    private func updateTargetHighlighting() {
+        for (itemID, target) in targetEntities {
+            if foundItemIDs.contains(itemID) {
+                target.root.scale = target.baseScale
+                setHighlight(target.highlight, color: .clear, enabled: false)
+                continue
+            }
+
+            if itemID == currentEligibleTargetID {
+                target.root.scale = target.baseScale * SIMD3<Float>(repeating: 1.12)
+                setHighlight(target.highlight, color: .init(red: 0.12, green: 0.92, blue: 0.72, alpha: 0.95), enabled: true)
+            } else if itemID == currentGazeTargetID {
+                target.root.scale = target.baseScale * SIMD3<Float>(repeating: 1.06)
+                setHighlight(target.highlight, color: .init(red: 0.98, green: 0.82, blue: 0.28, alpha: 0.9), enabled: true)
+            } else {
+                target.root.scale = target.baseScale
+                setHighlight(target.highlight, color: .clear, enabled: false)
+            }
+        }
+    }
+
+    private func normalizeVisualScale(_ visual: Entity, boundsRadius: Float) {
+        let bounds = visual.visualBounds(relativeTo: visual)
+        let extents = bounds.extents
+        let longestSide = max(extents.x, max(extents.y, extents.z))
+        guard longestSide > 0.0001 else {
+            return
+        }
+
+        let targetDiameter = max(boundsRadius * 2.6, 0.16)
+        let scaleFactor = min(max(targetDiameter / longestSide, 0.7), 4.8)
+        visual.scale *= SIMD3<Float>(repeating: scaleFactor)
     }
 
     private func logPinchState(reason: String, targetedEntity: Entity?, candidateID: String? = nil) {
@@ -978,6 +1191,43 @@ final class GlassVisionRuntime: ObservableObject {
         [GlassVision][Pinch] reason=\(reason) targeted=\(targetedName) candidate=\(candidateID ?? "nil") gaze=\(currentGazeTargetID ?? "nil") eligible=\(currentEligibleTargetID ?? "nil") armed=\(armedTargetID ?? "nil") armedAge=\(armedAgeText) overlap=\(overlapText) occlusion=\(occlusionText) portalVisible=\(isPortalVisible) runtime=\(String(describing: runtimeMode)) state=\(glassState.rawValue) feedback=\"\(latestFeedbackMessage)\"
         """
         print(message)
+    }
+
+    private func logSelectionSnapshot(
+        gazeCandidate: TargetEvaluation?,
+        eligibleCandidate: TargetEvaluation?,
+        resolvedCandidate: TargetEvaluation?,
+        candidateCount: Int
+    ) {
+        let now = Date()
+        let gazeID = gazeCandidate?.targetID ?? "nil"
+        let eligibleID = eligibleCandidate?.targetID ?? "nil"
+        let resolvedID = resolvedCandidate?.targetID ?? "nil"
+        let token = "\(gazeID)|\(eligibleID)|\(resolvedID)|\(candidateCount)"
+        let shouldLog = token != lastSelectionLogToken || now.timeIntervalSince(lastSelectionLogDate) > 0.6
+        guard shouldLog else {
+            return
+        }
+
+        lastSelectionLogToken = token
+        lastSelectionLogDate = now
+
+        let gazeSummary = formatCandidateLog(gazeCandidate)
+        let eligibleSummary = formatCandidateLog(eligibleCandidate)
+        let resolvedSummary = formatCandidateLog(resolvedCandidate)
+        print("[GlassVision][Select] candidates=\(candidateCount) gaze=\(gazeSummary) eligible=\(eligibleSummary) resolved=\(resolvedSummary)")
+    }
+
+    private func formatCandidateLog(_ candidate: TargetEvaluation?) -> String {
+        guard let candidate else {
+            return "nil"
+        }
+        let overlap = String(format: "%.2f", Double(candidate.overlapScore))
+        let radial = String(format: "%.3f", Double(candidate.radialDistance))
+        let depth = String(format: "%.3f", Double(candidate.depth))
+        let required = String(format: "%.2f", Double(candidate.requiredOverlap))
+        let occlusion = candidate.passedOcclusion ? "clear" : "blocked"
+        return "\(candidate.targetID){side=\(candidate.portalSideName),overlap=\(overlap),required=\(required),center=\(candidate.centerInsidePortal),occlusion=\(occlusion),radial=\(radial),depth=\(depth)}"
     }
 
     private func clearHierarchy() {
@@ -1009,7 +1259,7 @@ final class GlassVisionRuntime: ObservableObject {
     private func isPortalEntity(_ entity: Entity) -> Bool {
         var current: Entity? = entity
         while let candidate = current {
-            if candidate === portalDisk {
+            if candidate === portalDisk || candidate === portalDiskBack {
                 return true
             }
             current = candidate.parent
@@ -1018,14 +1268,15 @@ final class GlassVisionRuntime: ObservableObject {
     }
 
     private func setHighlight(_ entity: Entity, color: UIColor, enabled: Bool) {
-        guard let modelEntity = entity as? ModelEntity else {
-            entity.isEnabled = enabled
-            return
-        }
-
-        if var model = modelEntity.components[ModelComponent.self] {
+        if let modelEntity = entity as? ModelEntity, var model = modelEntity.components[ModelComponent.self] {
             model.materials = [GeneratedAssetFactory.unlitMaterial(color)]
             modelEntity.components.set(model)
+        }
+        for child in entity.children {
+            if let modelChild = child as? ModelEntity, var model = modelChild.components[ModelComponent.self] {
+                model.materials = [GeneratedAssetFactory.unlitMaterial(color)]
+                modelChild.components.set(model)
+            }
         }
         entity.isEnabled = enabled
     }

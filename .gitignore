@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Xcode build artifacts
+DerivedData/
+.derivedData/
+build/
+
+# SwiftPM build artifacts
+.build/
+
+# Xcode user state and per-developer settings
+**/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# SwiftPM Xcode user settings
+**/.swiftpm/xcode/xcuserdata/
+
+# Logs
+*.xcactivitylog
