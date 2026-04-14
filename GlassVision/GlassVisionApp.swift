@@ -28,5 +28,6 @@ struct GlassVisionApp: App {
                 }
         }
         .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .immersiveEnvironmentBehavior(.coexist)
     }
 }
